@@ -22,6 +22,22 @@ This repository starts from the hardware and native platform layer. It intention
 8. Implement project-specific APIs according to the implementation model of their own upstream project, not by routing one project through another.
 9. Keep the firmware buildable after every migration step.
 
+## Nearby Devices application workflow
+
+The product-level integration target is one generic **Nearby Devices Browser / Controller** built around Home Assistant-style **Device → Entity → State/control** semantics.
+
+The canonical application-layer workflow is documented in:
+
+- [`docs/application/nearby-devices-browser-controller.md`](docs/application/nearby-devices-browser-controller.md)
+- [`docs/application/nearby-devices-product-rules.md`](docs/application/nearby-devices-product-rules.md)
+- [`docs/application/provisioning-web-management.md`](docs/application/provisioning-web-management.md)
+
+All three documents are required reading for Agents implementing the Nearby Devices application. The first defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. The second freezes the production storage and UX rules: the full Device DB lives on SD, unknown/unmatched devices remain visible with generic information, and the UI follows the Home Assistant-like blue/white card language established by the previous NearBy One NEXT UI. The third defines persistent Wi-Fi provisioning and Device DB import through the temporary SoftAP/Web Management portal, including the old NearBy One NEXT code that should be directly reused or adapted.
+
+If the main workflow guide contains an older recommendation that conflicts with `nearby-devices-product-rules.md` in storage/unknown-device/UI areas, the product-rules document wins. For provisioning, SoftAP/Web Management and database-upload behavior, `provisioning-web-management.md` is authoritative.
+
+Agents implementing application integration must read all three documents before introducing scan orchestration, recognition, Device/Entity mapping, database storage, provisioning, Web Management, UI behavior or control routing.
+
 ## Source layout
 
 ```text
