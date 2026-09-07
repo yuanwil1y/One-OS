@@ -22,6 +22,18 @@ This repository starts from the hardware and native platform layer. It intention
 8. Implement project-specific APIs according to the implementation model of their own upstream project, not by routing one project through another.
 9. Keep the firmware buildable after every migration step.
 
+## Nearby Devices application workflow
+
+The product-level integration target is one generic **Nearby Devices Browser / Controller** built around Home Assistant-style **Device → Entity → State/control** semantics.
+
+The canonical application-layer workflow is documented in:
+
+- [`docs/application/nearby-devices-browser-controller.md`](docs/application/nearby-devices-browser-controller.md)
+
+That document defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. It also defines the unique owner for every capability so project Level-2 API families do not duplicate one another.
+
+Agents implementing application integration must read that document before introducing scan orchestration, recognition, Device/Entity mapping or control routing.
+
 ## Source layout
 
 ```text
