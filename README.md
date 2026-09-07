@@ -42,7 +42,7 @@ firmware/
    └─ main.c
 ```
 
-The released `v0.1.0-beta.1` hardware smoke image remains available from GitHub Releases as the archived board/radio/storage validation build. The smoke-test application is not part of the current production source baseline.
+The released `v0.1.0-beta.1` and `v0.1.0-beta.2` hardware smoke images remain available from GitHub Releases as archived board/radio/storage validation builds. The smoke-test application is not part of the current production source baseline.
 
 ## Hardware baseline
 
