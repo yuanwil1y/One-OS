@@ -1,45 +1,85 @@
-# One-OS — ESPHome Level-2 API Research Agent
+# One-OS — ESPHome Level-2 API Implementation Agent
 
-## Mission
+## Status
 
-Research and, only after approval, implement **ESPHome-derived Level-2 APIs** for One-OS on Waveshare ESP32-C6-Touch-LCD-1.9.
+Phase 1 research is complete. **Implementation is approved only for the deduplicated scope below.**
 
-Read root `README.md` first. One-OS aims to discover nearby devices, identify them, enumerate usable capabilities, read information/state, and perform legitimate interaction/control.
+Read root `README.md`, `docs/research/esphome-l2-api.md`, and the canonical `main` application docs before coding (use `git show origin/main:<path>` if needed):
 
-## API boundary
+- `docs/application/nearby-devices-browser-controller.md`
+- `docs/application/nearby-devices-product-rules.md`
+- `docs/application/provisioning-web-management.md`
 
-- L1 stays native: ESP-IDF, NimBLE, lwIP, FreeRTOS, LVGL, IEEE 802.15.4, thin BSP.
-- L2 must add real reusable behavior by composing native calls; no one-call renaming wrappers.
-- ESPHome family uses `esphome_*` names.
-- This family must not call or expose another project API family.
-- Do not import ESPHome's YAML/code-generation framework or recreate its whole runtime.
+## Final unique ownership
 
-## Starting hypotheses to verify
+ESPHome owns only:
 
-Research ESPHome capabilities with direct value to One-OS, especially:
+1. **generic BLE GATT device interaction workflow**;
+2. **ESPHome Native API interrogation/state/control**.
 
-- BLE tracker/client/proxy-style discovery and connection workflows;
-- service/characteristic enumeration, read/write/notify flows where ESPHome provides meaningful orchestration;
-- concrete device/vendor protocol implementations that identify devices or expose sensor/state/control capabilities;
-- local-network discovery/control protocols implemented by ESPHome where they can be bounded for ESP32-C6;
-- reusable device interrogation/state/control patterns rather than configuration-system features.
+Use `esphome_ble_gatt_*` and `esphome_api_*` names.
 
-Treat these as starting hypotheses only. Determine which capabilities are actually reusable Level-2 APIs and which belong to apps, generators, or ESPHome-specific infrastructure.
+## Approved implementation scope
 
-## Phase 1 — research only
+Implement bounded GATT workflows equivalent in capability to:
 
-Do not implement production code. Inspect upstream ESPHome docs/source and relevant previous NearBy/One-OS research.
+```c
+esphome_ble_gatt_connect(...);
+esphome_ble_gatt_discover(...);
+esphome_ble_gatt_read(...);
+esphome_ble_gatt_write(...);
+esphome_ble_gatt_subscribe(...);
+esphome_ble_gatt_disconnect(...);
+```
 
-For each candidate report: upstream source/module; exact behavior; supported device/protocol scope; value to discovery/identification/state/control; proposed `esphome_*` C API/data types; native APIs composed; why it is L2; ESP32-C6 feasibility; memory/bounds; authorization/security requirements; licensing/provenance (`COPY`, `PORT`, `CLEAN-ROOM REIMPLEMENT`, `REFERENCE-ONLY`); disposition (`L2 API`, `APP`, `TEST/TOOL`, `DROP`); test vectors/edge cases.
+The API must add real lifecycle/orchestration value: connection timeout, service/characteristic discovery, bounded copied results, subscription lifecycle, error cleanup and native-state restoration. Do not wrap a single NimBLE call just to rename it.
 
-Pay special attention to whether a device-specific implementation should become a reusable API family capability or remain application/device-plugin data. Avoid creating hundreds of trivial wrappers.
+Then implement the smallest practical ESPHome Native API vertical slice, prioritizing:
 
-Create `docs/research/esphome-l2-api.md`, finish with a prioritized API table and exclusions, commit it, report findings, then **stop**. Implementation requires explicit user approval.
+```c
+esphome_api_probe(...);
+esphome_api_entities(...);
+esphome_api_subscribe(...);
+esphome_api_command(...);
+```
 
-## Phase 2 — only after explicit approval
+If protobuf/Noise footprint blocks the full slice, first land the bounded transport/probe foundation and document the measured blocker. Do not fake unsupported behavior.
 
-Implement only approved APIs with bounded memory/results, explicit timeouts/cancellation where needed, native-state restoration, tests, provenance notes, and a continuously buildable ESP32-C6 tree. No cross-family dependency and no generic `nearby_*` compatibility layer.
+## Explicitly do NOT implement
 
-## Safety boundary
+Do not implement in this family:
 
-Authorized discovery, connection, interrogation, subscriptions, reads/writes and device control are in scope. Do not implement credential theft, auth bypass, deauthentication, poisoning, session hijacking, exploit delivery, hostile MITM or persistence on third-party devices.
+- BLE RF scanning/tracking;
+- BLE advertisement AD parsing;
+- mDNS discovery;
+- BTHome/Xiaomi/Ruuvi passive decoders;
+- separate ESPHome device matching database;
+- generic hardware fingerprint matching;
+- protocol-specific UI.
+
+Those unique owners are Kismet, Wireshark, HA, Theengs/Device DB and the application respectively.
+
+## Architecture rules
+
+- L1 remains native ESP-IDF/NimBLE/lwIP/FreeRTOS/BSP.
+- No cross-family dependency: do not call Kismet, Wireshark, HA, Theengs, Nmap, zigpy, ZHA, OpenThread or Matter APIs.
+- Device matching is performed by the single application Device DB; ESPHome receives an already selected target/profile/binding from the application.
+- No generic `nearby_*` compatibility layer.
+- Credentials/Noise keys are caller/application supplied and never guessed or logged.
+
+## Implementation requirements
+
+- fixed/bounded service/characteristic/subscription/result storage;
+- explicit timeout/cancel/disconnect cleanup;
+- malformed/oversized payload handling;
+- tests with mock/fixture GATT and Native API messages where possible;
+- continuously buildable ESP32-C6 tree;
+- provenance notes and previous-project reuse notes.
+
+## Safety
+
+Authorized BLE connection/read/write/notify and authenticated ESPHome control are in scope. No credential theft, auth bypass, hostile MITM, session hijacking, exploit delivery or persistence.
+
+## Completion
+
+Implement, test and commit the approved scope on this branch, then report APIs, files, build/tests, measured footprint if available, and remaining limitations.
