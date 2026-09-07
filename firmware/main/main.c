@@ -1,5 +1,6 @@
 #include "board.h"
 #include "lvgl_port.h"
+#include "smoke_gui.h"
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -11,12 +12,15 @@ void app_main(void)
     board_lcd_handles_t lcd = {0};
     ESP_ERROR_CHECK(board_lcd_init(&lcd));
     ESP_ERROR_CHECK(lvgl_port_init(&lcd));
+    ESP_ERROR_CHECK(smoke_gui_init());
 
     /*
-     * app_main is the initial LVGL owner task. Keep all ordinary LVGL calls on
-     * this task until an application deliberately introduces its own UI owner.
+     * app_main is the LVGL owner task. Radio and SD smoke tests run on a worker
+     * task and return results through a queue; only this task touches LVGL.
      */
     for (;;) {
+        smoke_gui_poll();
+
         uint32_t delay_ms = lv_timer_handler();
         if (delay_ms < 1u) {
             delay_ms = 1u;

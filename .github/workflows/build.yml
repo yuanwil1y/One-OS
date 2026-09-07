@@ -7,17 +7,64 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  BETA_TAG: v0.1.0-beta.1
+  MERGED_BIN: One-OS-v0.1.0-beta.1-merged.bin
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build ESP32-C6 firmware
+
+      - name: Build ESP32-C6 firmware and merged image
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.1
           target: esp32c6
           path: firmware
-          command: idf.py build
+          command: >-
+            idf.py build &&
+            idf.py merge-bin -o One-OS-v0.1.0-beta.1-merged.bin -f raw &&
+            sha256sum build/One-OS-v0.1.0-beta.1-merged.bin > build/One-OS-v0.1.0-beta.1-merged.bin.sha256
+
+      - name: Upload merged firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-os-v0.1.0-beta.1
+          if-no-files-found: error
+          path: |
+            firmware/build/One-OS-v0.1.0-beta.1-merged.bin
+            firmware/build/One-OS-v0.1.0-beta.1-merged.bin.sha256
+
+  beta-release:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[beta-release]')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download merged firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: one-os-v0.1.0-beta.1
+          path: dist
+
+      - name: Create or update beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$BETA_TAG" >/dev/null 2>&1; then
+            gh release upload "$BETA_TAG" "dist/$MERGED_BIN" "dist/$MERGED_BIN.sha256" --clobber
+          else
+            gh release create "$BETA_TAG" \
+              "dist/$MERGED_BIN#Merged ESP32-C6 flash image" \
+              "dist/$MERGED_BIN.sha256#SHA-256 checksum" \
+              --target "$GITHUB_SHA" \
+              --title "One-OS v0.1.0-beta.1" \
+              --prerelease \
+              --notes $'Hardware smoke-test beta for Waveshare ESP32-C6-Touch-LCD-1.9.\n\nIncludes touch GUI tests for Wi-Fi active scan, BLE passive discovery, IEEE 802.15.4 channel sweep, SD write/read verification, and confirmed FAT formatting.\n\nThe merged binary contains bootloader + partition table + application and is intended to be flashed at offset 0x0.'
+          fi
