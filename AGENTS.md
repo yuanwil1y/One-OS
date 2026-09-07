@@ -1,47 +1,86 @@
-# One-OS — Matter / CHIP Tool Level-2 API Research Agent
+# One-OS — Matter / CHIP Level-2 API Implementation Agent
 
-## Mission
+## Status
 
-Research and, only after approval, implement **Project CHIP / CHIP Tool-derived Level-2 APIs** for One-OS on Waveshare ESP32-C6-Touch-LCD-1.9.
+Phase 1 research is complete. **Implementation is approved only for the deduplicated Matter controller scope below.**
 
-Read root `README.md` first. One-OS aims to discover Matter devices, identify capabilities, read/subscribe to state, commission authorized devices, and invoke legitimate controls.
+Read root `README.md`, `docs/research/matter-chip-tool-l2-api.md`, and the canonical `main` application docs before coding (use `git show origin/main:<path>` if needed):
 
-## API boundary
+- `docs/application/nearby-devices-browser-controller.md`
+- `docs/application/nearby-devices-product-rules.md`
+- `docs/application/provisioning-web-management.md`
 
-- L1 stays native: ESP-IDF networking/BLE/802.15.4 facilities, FreeRTOS, lwIP and thin BSP.
-- L2 must provide meaningful Matter workflows/model behavior; no trivial wrappers.
-- Prefer project-derived `chip_*` naming when mirroring CHIP Tool/controller workflows. Use `matter_*` only when the API represents protocol semantics rather than a CHIP Tool-specific workflow; explain every naming choice in the report.
-- This family must not depend on Home Assistant, OpenThread, ZHA or other One-OS project API families. Apps may compose them.
+## Final unique ownership
 
-## Starting hypotheses to verify
+Matter/CHIP owns only protocol/controller operations **after the application has identified a Matter candidate**.
 
-Investigate:
+It does not own generic BLE or mDNS environment scanning.
 
-- commissionable-node discovery over BLE/IP;
-- commissioning and fabric/session lifecycle suitable for an embedded controller;
-- endpoint/cluster discovery;
-- attribute read/write and subscriptions;
-- event subscriptions/reads;
-- command invocation;
-- device/cluster metadata needed to expose controllable capabilities;
-- diagnostics or operational discovery useful after commissioning.
+Use `chip_*` for controller/CHIP-style operations and `matter_*` for protocol-semantic helpers such as node probing.
 
-Treat all of these as hypotheses. Determine what is feasible on ESP32-C6 without importing an oversized host controller stack unchanged.
+## Approved implementation scope
 
-## Phase 1 — research only
+Implement in this order:
 
-Do not write production firmware. Inspect connectedhomeip/CHIP Tool upstream source/docs and relevant previous One-OS/NearBy work.
+1. **controller footprint/feasibility spike on ESP32-C6**;
+2. persisted single-controller/fabric foundation if feasible;
+3. secure session to an already authorized node;
+4. bounded node interrogation;
+5. Interaction Model read support;
+6. then write/invoke/subscribe if footprint remains acceptable;
+7. commissioning only after the previous stages are proven.
 
-For each candidate API document: exact upstream source/module/command semantics; protocol prerequisite; value to discovery/state/control; proposed `chip_*`/`matter_*` C API/types; L1 facilities required; why it is L2; required Matter stack footprint; ESP32-C6 RAM/flash feasibility; credential/fabric/persistence requirements; concurrency/radio interactions; license/provenance (`COPY`, `PORT`, `CLEAN-ROOM REIMPLEMENT`, `REFERENCE-ONLY`); disposition (`L2 API`, `APP`, `DATA`, `TEST/TOOL`, `DROP`); interoperability/negative tests.
+Target APIs/capabilities include:
 
-Explicitly identify which operations require user ownership/commissioning credentials and which are public discovery only.
+```c
+chip_controller_init(...);
+chip_controller_shutdown(...);
+matter_node_probe(...);
+chip_read_attribute(...);
+chip_write_attribute(...);
+chip_invoke(...);
+chip_subscribe_start(...);
+chip_subscribe_stop(...);
+chip_commission_onnetwork(...);
+chip_commission_ble_wifi(...);
+chip_commission_ble_thread(...);
+```
 
-Create `docs/research/matter-chip-tool-l2-api.md`, ending with a prioritized API table, footprint risks and exclusions. Commit, report findings, then **stop** until explicit user approval.
+Do not invent APIs that cannot actually fit/run. If controller footprint blocks later stages, land the proven subset and document measured limits.
 
-## Phase 2 — only after explicit approval
+## Explicitly do NOT implement
 
-Implement only approved APIs with bounded buffers/state, explicit timeouts and error states, secure credential handling, tests, provenance notes and continuous ESP32-C6 buildability. Do not route this family through OpenThread or Home Assistant APIs; use native/platform facilities directly.
+- generic BLE scanning;
+- generic mDNS/DNS-SD scanning;
+- duplicate Matter candidate scanning pipeline;
+- Thread network management (OpenThread owns that);
+- HA Device/Entity logic;
+- a separate Matter recognition DB.
 
-## Safety boundary
+Matter candidates arrive from the application through Kismet/Wireshark BLE evidence or HA mDNS evidence plus Device DB matching. The Matter family then takes over protocol operations.
 
-Public discovery plus authorized commissioning, attribute access, subscriptions and command/control are in scope. Do not bypass commissioning/security, steal fabric credentials, hijack sessions, exploit devices, or persist on third-party devices.
+## Architecture rules
+
+- No calls to HA, Kismet, Wireshark, OpenThread, ZHA or other L2 families.
+- Use connectedhomeip/native ESP-IDF platform facilities directly.
+- No generic `nearby_*` layer.
+- Fabric credentials and commissioning material are secure persistent protocol state, never Device DB data.
+- Commissioning is always an explicit user action; normal environment scan never commissions automatically.
+
+## Implementation requirements
+
+- measured flash/RAM/task-stack footprint for the controller spike;
+- bounded endpoint/cluster/attribute results;
+- explicit timeout/cancel/error state;
+- secure credential handling and no secret logging;
+- CASE/ACL/attestation failures handled fail-closed;
+- tests where possible plus real ESP32-C6 build validation;
+- provenance/version notes for connectedhomeip integration.
+
+## Safety
+
+Public discovery evidence may be consumed, but only authorized Matter sessions, reads, writes, subscriptions and commissioning are in scope. No security bypass, credential theft, attestation bypass, hijacking, exploit delivery or unauthorized persistence.
+
+## Completion
+
+Implement the largest proven subset in the approved order, commit it, and report APIs, exact footprint measurements if obtained, build/tests, what was deferred and why.
