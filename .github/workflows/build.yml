@@ -14,6 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Run Kismet L2 host regression tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Itools/kismet_l2_host_tests/stub \
+            -Ifirmware/components/kismet_l2/include \
+            -Ifirmware/components/kismet_l2 \
+            tools/kismet_l2_host_tests/kismet_l2_host_test.c \
+            firmware/components/kismet_l2/kismet_wifi_tracker.c \
+            firmware/components/kismet_l2/kismet_wifi_decode.c \
+            firmware/components/kismet_l2/kismet_ble_tracker.c \
+            -o /tmp/kismet_l2_host_test
+          /tmp/kismet_l2_host_test
       - name: Build ESP32-C6 firmware
         uses: espressif/esp-idf-ci-action@v1
         with:
