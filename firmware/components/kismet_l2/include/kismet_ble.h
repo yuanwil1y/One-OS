@@ -15,6 +15,12 @@ extern "C" {
 #define KISMET_BLE_HARD_MAX_DEVICES 128u
 #define KISMET_BLE_MAX_ADV_COPY 255u
 
+#define KISMET_BLE_DEFAULT_DURATION_MS 5000u
+#define KISMET_BLE_DEFAULT_REPORT_COPY_LEN 255u
+#define KISMET_BLE_DEFAULT_REPORT_QUEUE_DEPTH 8u
+#define KISMET_BLE_HARD_MAX_REPORT_QUEUE_DEPTH 16u
+#define KISMET_BLE_HARD_MAX_DURATION_MS 600000u
+
 #define KISMET_BLE_PARTIAL_DEVICE_EVICTION (1u << 0)
 #define KISMET_BLE_PARTIAL_REPORT_DROP (1u << 1)
 #define KISMET_BLE_PARTIAL_TRUNCATED_REPORT (1u << 2)
@@ -84,9 +90,9 @@ typedef void (*kismet_ble_report_callback_t)(const kismet_ble_report_t *report,
                                               void *user_ctx);
 
 typedef struct {
-    uint32_t duration_ms;
-    uint16_t report_copy_len;
-    uint8_t report_queue_depth;
+    uint32_t duration_ms;      /* 0 = KISMET_BLE_DEFAULT_DURATION_MS. */
+    uint16_t report_copy_len;  /* 0 = KISMET_BLE_DEFAULT_REPORT_COPY_LEN. */
+    uint8_t report_queue_depth;/* 0 = KISMET_BLE_DEFAULT_REPORT_QUEUE_DEPTH. */
 } kismet_ble_session_config_t;
 
 typedef struct {
@@ -100,8 +106,10 @@ typedef struct {
     uint32_t partial_flags;
 } kismet_ble_session_result_t;
 
-/* v1 owns one NimBLE host lifecycle for the bounded passive scan. The application
- * serializes this stage with other BLE owners; no GATT or AD parsing is performed. */
+/* v1 owns one NimBLE host lifecycle for the bounded passive scan. The
+ * application serializes this stage with other BLE owners. No GATT, AD
+ * structure parsing, service parsing, manufacturer parsing, or recognition is
+ * performed here. */
 esp_err_t kismet_ble_session_start(const kismet_ble_session_config_t *config,
                                    kismet_ble_tracker_t *tracker,
                                    kismet_ble_report_callback_t report_cb,
@@ -112,6 +120,9 @@ esp_err_t kismet_ble_session_wait(kismet_ble_session_t *session, uint32_t timeou
 esp_err_t kismet_ble_session_get_result(const kismet_ble_session_t *session,
                                         kismet_ble_session_result_t *out_result);
 void kismet_ble_session_destroy(kismet_ble_session_t *session);
+
+/* Tracker enumeration/get calls are intended after the mutating session has
+ * completed (or otherwise under application-owned serialization). */
 
 #ifdef __cplusplus
 }

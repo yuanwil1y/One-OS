@@ -27,6 +27,13 @@ extern "C" {
 #define KISMET_WIFI_MAX_SSID_LEN 32u
 #define KISMET_WIFI_MAX_FRAME_COPY 256u
 
+#define KISMET_WIFI_DEFAULT_DWELL_MS 200u
+#define KISMET_WIFI_DEFAULT_DURATION_MS 5000u
+#define KISMET_WIFI_DEFAULT_FRAME_COPY_LEN 256u
+#define KISMET_WIFI_DEFAULT_RX_QUEUE_DEPTH 8u
+#define KISMET_WIFI_HARD_MAX_RX_QUEUE_DEPTH 16u
+#define KISMET_WIFI_HARD_MAX_DURATION_MS 600000u
+
 #define KISMET_WIFI_PARTIAL_DEVICE_EVICTION (1u << 0)
 #define KISMET_WIFI_PARTIAL_SSID_EVICTION (1u << 1)
 #define KISMET_WIFI_PARTIAL_RELATION_EVICTION (1u << 2)
@@ -37,6 +44,8 @@ extern "C" {
 
 #define KISMET_WIFI_RELATION_EVIDENCE_TO_DS (1u << 0)
 #define KISMET_WIFI_RELATION_EVIDENCE_FROM_DS (1u << 1)
+#define KISMET_WIFI_RELATION_EVIDENCE_ASSOC_REQUEST (1u << 2)
+#define KISMET_WIFI_RELATION_EVIDENCE_ASSOC_RESPONSE (1u << 3)
 
 #define KISMET_WIFI_ROLE_FLAG_AP (1u << 0)
 #define KISMET_WIFI_ROLE_FLAG_STA (1u << 1)
@@ -77,6 +86,9 @@ typedef enum {
     KISMET_WIFI_SSID_PROBED,
 } kismet_wifi_ssid_observation_kind_t;
 
+/* Shallow RF observation consumed by the bounded tracker. Deep management/IE
+ * parsing is intentionally outside this family; applications may populate the
+ * optional SSID fields from an independent parser before calling ingest. */
 typedef struct {
     uint64_t seen_ms;
     uint8_t device[6];
@@ -177,7 +189,7 @@ typedef struct {
     int8_t rssi;
     uint8_t channel;
     kismet_wifi_capture_type_t type;
-    uint16_t original_len;
+    uint16_t original_len; /* 802.11 bytes excluding FCS when native RX supplied it. */
     uint16_t captured_len;
     bool truncated;
     uint8_t bytes[KISMET_WIFI_MAX_FRAME_COPY];
@@ -189,10 +201,10 @@ typedef void (*kismet_wifi_frame_callback_t)(const kismet_wifi_frame_t *frame,
 typedef struct {
     uint8_t channels[KISMET_WIFI_MAX_CHANNELS];
     uint8_t channel_count; /* 0 = derive legal 2.4 GHz channels from country config. */
-    uint16_t dwell_ms;
-    uint32_t duration_ms;
-    uint16_t frame_copy_len;
-    uint8_t rx_queue_depth;
+    uint16_t dwell_ms;     /* 0 = KISMET_WIFI_DEFAULT_DWELL_MS. */
+    uint32_t duration_ms;  /* 0 = KISMET_WIFI_DEFAULT_DURATION_MS. */
+    uint16_t frame_copy_len; /* 0 = KISMET_WIFI_DEFAULT_FRAME_COPY_LEN. */
+    uint8_t rx_queue_depth;  /* 0 = KISMET_WIFI_DEFAULT_RX_QUEUE_DEPTH. */
 } kismet_wifi_session_config_t;
 
 typedef struct {
@@ -208,9 +220,10 @@ typedef struct {
     uint32_t partial_flags;
 } kismet_wifi_session_result_t;
 
-/* v1 owns the native Wi-Fi driver lifecycle and refuses to start if Wi-Fi is already
- * initialized. This preserves provisioning/STA state instead of clobbering an unknown
- * native callback/mode; the application restores connectivity after the RF stage. */
+/* v1 owns the native Wi-Fi driver lifecycle and refuses to start if Wi-Fi is
+ * already initialized. This avoids clobbering provisioning/STA mode or an
+ * unknown promiscuous callback. The application owns cross-family scheduling
+ * and reconnects STA after this bounded RF stage when needed. */
 esp_err_t kismet_wifi_session_start(const kismet_wifi_session_config_t *config,
                                     kismet_wifi_tracker_t *tracker,
                                     kismet_wifi_frame_callback_t frame_cb,
@@ -221,6 +234,9 @@ esp_err_t kismet_wifi_session_wait(kismet_wifi_session_t *session, uint32_t time
 esp_err_t kismet_wifi_session_get_result(const kismet_wifi_session_t *session,
                                          kismet_wifi_session_result_t *out_result);
 void kismet_wifi_session_destroy(kismet_wifi_session_t *session);
+
+/* Tracker enumeration/get calls are intended after the mutating session has
+ * completed (or otherwise under application-owned serialization). */
 
 #ifdef __cplusplus
 }
