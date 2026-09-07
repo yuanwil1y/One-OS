@@ -1,5 +1,6 @@
 #include "board.h"
 #include "lvgl_port.h"
+#include "smoke_gui.h"
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -11,9 +12,12 @@ void app_main(void)
     board_lcd_handles_t lcd = {0};
     ESP_ERROR_CHECK(board_lcd_init(&lcd));
     ESP_ERROR_CHECK(lvgl_port_init(&lcd));
+    ESP_ERROR_CHECK(smoke_gui_init());
 
-    /* app_main is the single LVGL owner task in the foundation firmware. */
+    /* Only this task owns LVGL; smoke tests run on a worker task. */
     for (;;) {
+        smoke_gui_poll();
+
         uint32_t delay_ms = lv_timer_handler();
         if (delay_ms < 1u) {
             delay_ms = 1u;
