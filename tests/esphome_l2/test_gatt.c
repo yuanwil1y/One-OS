@@ -1,0 +1,27 @@
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "esphome_ble_gatt.h"
+#include "private/esphome_ble_gatt_internal.h"
+typedef struct{void*owner;esphome_ble_gatt_backend_notify_fn notify;bool connected;bool fail_connect;bool lose_next;bool timeout_next;uint16_t last_cccd;bool notify_enabled;int disconnects,cancels;} mock_t;
+static esp_err_t mi(void*ctx,void*owner,esphome_ble_gatt_backend_notify_fn n,int*ne){mock_t*c=ctx;memset(c,0,sizeof(*c));c->owner=owner;c->notify=n;*ne=0;return ESP_OK;} static void md(void*ctx){(void)ctx;}
+static esp_err_t mc(void*ctx,const esphome_ble_peer_t*p,uint32_t t,int*n){(void)p;(void)t;mock_t*c=ctx;if(c->fail_connect){*n=7;return ESP_FAIL;}c->connected=true;return ESP_OK;}
+static esp_err_t mdisc(void*ctx,esphome_ble_gatt_db_t*db,uint32_t t,int*n){(void)ctx;(void)t;(void)n;if(db->service_capacity){db->services[0]=(esphome_ble_gatt_service_t){.start_handle=1,.end_handle=9,.first_characteristic=0,.characteristic_count=1};db->service_count=1;}else db->truncated=true;if(db->characteristic_capacity){db->characteristics[0]=(esphome_ble_gatt_characteristic_t){.definition_handle=2,.value_handle=3,.end_handle=9};db->characteristic_count=1;}else db->truncated=true;return ESP_OK;}
+static esp_err_t mr(void*ctx,uint16_t h,uint8_t*out,size_t cap,size_t*len,uint32_t t,int*n){(void)h;(void)t;mock_t*c=ctx;if(c->timeout_next){c->timeout_next=false;*n=99;return ESP_ERR_TIMEOUT;}if(c->lose_next){c->lose_next=false;c->connected=false;*n=8;return ESP_FAIL;}static const uint8_t v[]={1,2,3};*len=sizeof(v);if(cap<sizeof(v))return ESP_ERR_INVALID_SIZE;memcpy(out,v,sizeof(v));return ESP_OK;}
+static esp_err_t mw(void*ctx,uint16_t h,const uint8_t*d,size_t l,bool resp,uint32_t t,int*n){(void)ctx;(void)h;(void)d;(void)l;(void)resp;(void)t;(void)n;return ESP_OK;}
+static esp_err_t mn(void*ctx,uint16_t cccd,bool en,bool ind,uint32_t t,int*n){(void)ind;(void)t;(void)n;mock_t*c=ctx;c->last_cccd=cccd;c->notify_enabled=en;return ESP_OK;}
+static esp_err_t mcan(void*ctx,uint32_t t,int*n){(void)t;(void)n;mock_t*c=ctx;c->connected=false;c->cancels++;return ESP_OK;} static esp_err_t mdc(void*ctx,uint32_t t,int*n){mock_t*c=ctx;c->disconnects++;return mcan(ctx,t,n);} static bool mis(const void*ctx){return ((const mock_t*)ctx)->connected;}
+static const esphome_ble_gatt_backend_ops_t ops={.init=mi,.deinit=md,.connect=mc,.discover=mdisc,.read=mr,.write=mw,.set_notify=mn,.cancel=mcan,.disconnect=mdc,.connected=mis};
+const esphome_ble_gatt_backend_ops_t esphome_ble_gatt_nimble_backend={0};
+typedef struct{int suspends,resumes;uintptr_t token_seen;} radio_t; static esp_err_t rs(void*u,uintptr_t*t){radio_t*r=u;r->suspends++;*t=0x1234;return ESP_OK;} static void rr(void*u,uintptr_t t){radio_t*r=u;r->resumes++;r->token_seen=t;}
+static int notify_count;static void cb(uint16_t h,const uint8_t*d,size_t n,bool trunc,void*u){(void)u;assert(h==3&&n==2&&d[0]==9&&!trunc);notify_count++;}
+static mock_t*ctxof(esphome_ble_gatt_session_t*s){return (mock_t*)((esphome_ble_gatt_impl_t*)(void*)s)->backend_ctx;}
+int main(void){esphome_ble_gatt_session_t s;radio_t r={0};esphome_ble_gatt_config_t cfg={.connect_timeout_ms=10,.operation_timeout_ms=10,.disconnect_timeout_ms=10,.radio_suspend=rs,.radio_resume=rr,.radio_user=&r};assert(esphome_ble_gatt_init_with_backend(&s,&cfg,&ops)==ESP_OK);esphome_ble_peer_t p={{1,2,3,4,5,6},0};assert(esphome_ble_gatt_connect(&s,&p)==ESP_OK);assert(r.suspends==1&&!r.resumes&&esphome_ble_gatt_is_connected(&s));
+esphome_ble_gatt_service_t sv[1];esphome_ble_gatt_characteristic_t ch[1];esphome_ble_gatt_descriptor_t ds[1];esphome_ble_gatt_db_t db={.services=sv,.service_capacity=1,.characteristics=ch,.characteristic_capacity=1,.descriptors=ds,.descriptor_capacity=1};assert(esphome_ble_gatt_discover(&s,&db)==ESP_OK&&db.service_count==1&&db.characteristic_count==1&&!db.truncated);
+uint8_t b[3];size_t len=0;assert(esphome_ble_gatt_read(&s,3,b,sizeof(b),&len)==ESP_OK&&len==3&&b[2]==3);assert(esphome_ble_gatt_subscribe(&s,3,4,false,cb,NULL)==ESP_OK&&ctxof(&s)->notify_enabled);uint8_t nv[2]={9,8};ctxof(&s)->notify(ctxof(&s)->owner,3,nv,2,false);assert(notify_count==1);assert(esphome_ble_gatt_unsubscribe(&s,3)==ESP_OK&&!ctxof(&s)->notify_enabled);
+assert(esphome_ble_gatt_disconnect(&s)==ESP_OK&&r.resumes==1&&r.token_seen==0x1234);
+assert(esphome_ble_gatt_connect(&s,&p)==ESP_OK);ctxof(&s)->lose_next=true;assert(esphome_ble_gatt_read(&s,3,b,sizeof(b),&len)==ESP_FAIL&&r.resumes==2);
+ctxof(&s)->fail_connect=true;assert(esphome_ble_gatt_connect(&s,&p)==ESP_FAIL&&r.suspends==3&&r.resumes==3);ctxof(&s)->fail_connect=false;
+assert(esphome_ble_gatt_connect(&s,&p)==ESP_OK);ctxof(&s)->timeout_next=true;assert(esphome_ble_gatt_read(&s,3,b,sizeof(b),&len)==ESP_ERR_TIMEOUT);assert(ctxof(&s)->cancels>=1&&!esphome_ble_gatt_is_connected(&s)&&r.resumes==4);
+assert(esphome_ble_gatt_connect(&s,&p)==ESP_OK);assert(esphome_ble_gatt_cancel(&s)==ESP_OK&&!esphome_ble_gatt_is_connected(&s)&&r.resumes==5);esphome_ble_gatt_deinit(&s);
+esphome_ble_gatt_config_t bad={.radio_suspend=rs};assert(esphome_ble_gatt_init_with_backend(&s,&bad,&ops)==ESP_ERR_INVALID_ARG);puts("gatt tests: ok");return 0;}
