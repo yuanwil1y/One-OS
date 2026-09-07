@@ -1,40 +1,92 @@
-# One-OS — Wireshark Level-2 API Research Agent
+# One-OS — Wireshark Level-2 API Implementation Agent
 
-## Mission
+## Status
 
-Research and, only after approval, implement **Wireshark-derived Level-2 protocol parsing APIs** for One-OS on Waveshare ESP32-C6-Touch-LCD-1.9.
+Phase 1 research is complete. **Implementation is approved only for the deduplicated protocol-parser scope below.**
 
-Read root `README.md` first. One-OS aims to discover nearby devices, understand their protocols and extract enough structured information/state to support identification and legitimate interaction.
+Read root `README.md`, `docs/research/wireshark-l2-api.md`, and the canonical `main` application docs before coding (use `git show origin/main:<path>` if needed):
 
-## API boundary
+- `docs/application/nearby-devices-browser-controller.md`
+- `docs/application/nearby-devices-product-rules.md`
+- `docs/application/provisioning-web-management.md`
 
-- L1 stays native capture/network/radio APIs.
-- L2 may provide bounded protocol dissection/parsing that adds substantial reusable semantics.
-- Wireshark family uses `wireshark_*` names.
-- It must not call or expose another project API family.
-- Do not port Wireshark GUI, display-filter VM, plugin runtime, or the full dissector universe.
-- Do not create a single unbounded universal packet framework merely to imitate Wireshark.
+## Final unique ownership
 
-## Starting hypotheses to verify
+Wireshark owns only bounded **wire-bytes → structured protocol fields** parsing needed by the product.
 
-Research only protocol dissectors with direct One-OS value, prioritizing protocols already relevant to nearby-device discovery/control, such as selected 802.11 management/IE fields, BLE advertising/ATT/GATT, IEEE 802.15.4/Zigbee/Thread, mDNS/DNS, SSDP, DHCP and other high-value device-discovery protocols.
+Use `wireshark_*` names.
 
-The prior list is only a starting point. API work must be demand-driven and small enough for ESP32-C6.
+## Approved implementation scope
 
-## Phase 1 — research only
+Implement these production parsers first:
 
-Do not implement production code. Inspect Wireshark upstream dissectors/docs and relevant previous One-OS/NearBy parsers.
+```c
+wireshark_wifi_mgmt_parse(...);
+wireshark_wifi_ie_parse(...);      // may be internal/helper if public separation is not useful
+wireshark_ble_adv_parse(...);
+```
 
-For every candidate document: exact dissector/source and field semantics; why One-OS needs it; proposed `wireshark_*` C API/data types; capture bytes/native metadata required; why it is meaningful L2; malformed/truncated behavior to preserve; ESP32-C6 RAM/flash/code-size cost; bounded parsing design; endian/bitfield issues; license/provenance (`COPY`, `PORT`, `CLEAN-ROOM REIMPLEMENT`, `REFERENCE-ONLY`); disposition (`L2 API`, `APP`, `TEST/REFERENCE`, `DROP`); test vectors/fuzz cases.
+Wi-Fi parser should cover the bounded fields needed by Kismet/Application/Device DB, such as:
 
-Determine whether each candidate should actually become a production API or merely serve as a field-truth/reference source for another parser implementation. Do not force a Wireshark API when reference-only is more appropriate.
+- management subtype;
+- source/destination/BSSID;
+- SSID/hidden state;
+- channel;
+- capability bits;
+- RSN/AKM/cipher summary;
+- selected HT/HE metadata;
+- bounded vendor IE descriptors;
+- malformed/truncated flags.
 
-Create `docs/research/wireshark-l2-api.md`, ending with a prioritized small protocol/API set and explicit reference-only items. Commit, report findings, then **stop** until explicit implementation approval.
+BLE parser should cover generic AD structures such as:
 
-## Phase 2 — only after explicit approval
+- flags;
+- local name;
+- service UUIDs;
+- service data;
+- manufacturer data;
+- TX power;
+- appearance;
+- malformed/truncated state.
 
-Implement only approved parsers. Use bounded caller-owned/fixed-capacity results, strict length checks, deterministic error/partial semantics, fuzz/vector tests and provenance notes. Keep the ESP32-C6 build green. No cross-family dependency or generic `nearby_*` compatibility layer.
+## Explicitly do NOT implement
 
-## Safety boundary
+Do not implement in this product phase:
 
-Protocol parsing and ordinary authorized diagnostics are in scope. Do not add parsers/workflows whose product purpose is credential harvesting, security bypass, exploit delivery, session hijacking or other hostile behavior merely because Wireshark can dissect such traffic.
+- DNS/mDNS parser (HA owns mDNS discovery);
+- SSDP/DHCP parser if not directly required by the final app path;
+- Zigbee parser (zigpy/ZHA own Zigbee semantics);
+- Thread parser (OpenThread owns Thread semantics);
+- ATT/GATT controller/parser framework (ESPHome GATT owns interaction);
+- IEEE 802.15.4 MAC packet-inspector API solely for diagnostics;
+- a universal dissector engine/filter VM/plugin system;
+- device recognition/matching.
+
+If a future concrete app need requires another parser, leave it for later approval rather than expanding scope now.
+
+## Architecture rules
+
+- Parser APIs operate only on caller-provided bytes/native metadata and return bounded copied results.
+- No calls to Kismet, HA, ESPHome, zigpy, ZHA, OpenThread, Matter or other L2 families.
+- No generic `nearby_*` compatibility layer.
+- Device matching belongs only to the application Device DB.
+- Wireshark-derived field behavior is reference/provenance; respect licensing and use clean-room/reference-only implementation where required.
+
+## Implementation requirements
+
+- strict length/endian/bitfield validation;
+- deterministic OK/PARTIAL/MALFORMED/UNSUPPORTED/TRUNCATED semantics;
+- no packet-driven unbounded heap allocation;
+- fixed caps for UUIDs/vendor IEs/service fields;
+- golden vectors and malformed/truncated vectors;
+- fuzzable pure parser entry points where possible;
+- host tests plus ESP32-C6 build validation;
+- provenance notes for every field group.
+
+## Safety
+
+Normal protocol parsing/diagnostics are in scope. Do not add parsers/workflows whose product purpose is credential harvesting, security bypass, exploit delivery or session hijacking.
+
+## Completion
+
+Implement, test and commit the approved Wi-Fi management/IE and BLE AD parsers, then report APIs, parsed fields, test/fuzz coverage, build status and measured code-size impact if available.
