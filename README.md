@@ -29,10 +29,13 @@ The product-level integration target is one generic **Nearby Devices Browser / C
 The canonical application-layer workflow is documented in:
 
 - [`docs/application/nearby-devices-browser-controller.md`](docs/application/nearby-devices-browser-controller.md)
+- [`docs/application/nearby-devices-product-rules.md`](docs/application/nearby-devices-product-rules.md)
 
-That document defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. It also defines the unique owner for every capability so project Level-2 API families do not duplicate one another.
+Both documents are required reading for Agents implementing the Nearby Devices application. The first defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. The second freezes the production storage and UX rules: the full Device DB lives on SD, unknown/unmatched devices remain visible with generic information, and the UI follows the Home Assistant-like blue/white card language established by the previous NearBy One NEXT UI.
 
-Agents implementing application integration must read that document before introducing scan orchestration, recognition, Device/Entity mapping or control routing.
+If the main workflow guide contains an older recommendation that conflicts with `nearby-devices-product-rules.md` in those storage/unknown-device/UI areas, the product-rules document wins.
+
+Agents implementing application integration must read both documents before introducing scan orchestration, recognition, Device/Entity mapping, database storage, UI behavior or control routing.
 
 ## Source layout
 
