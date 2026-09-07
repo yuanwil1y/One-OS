@@ -1,0 +1,7 @@
+#pragma once
+#include "esphome_api.h"
+typedef struct { uint8_t *buf; size_t cap,len; bool failed; } esphome_pb_writer_t;
+typedef struct { const uint8_t *buf; size_t len,pos; bool failed; } esphome_pb_reader_t;
+void esphome_pb_writer_init(esphome_pb_writer_t*,uint8_t*,size_t); bool esphome_pb_put_varint(esphome_pb_writer_t*,uint32_t,uint64_t); bool esphome_pb_put_fixed32(esphome_pb_writer_t*,uint32_t,uint32_t); bool esphome_pb_put_float(esphome_pb_writer_t*,uint32_t,float); bool esphome_pb_put_bool(esphome_pb_writer_t*,uint32_t,bool); bool esphome_pb_put_string(esphome_pb_writer_t*,uint32_t,const char*,size_t);
+void esphome_pb_reader_init(esphome_pb_reader_t*,const uint8_t*,size_t); bool esphome_pb_next(esphome_pb_reader_t*,uint32_t*,uint8_t*,uint64_t*,const uint8_t**,size_t*,uint32_t*); void esphome_pb_copy_string(char*,size_t,const uint8_t*,size_t); float esphome_pb_fixed32_to_float(uint32_t);
+bool esphome_api_codec_hello_request(uint8_t*,size_t,size_t*); bool esphome_api_codec_parse_hello(const uint8_t*,size_t,esphome_api_probe_result_t*); bool esphome_api_codec_parse_device_info(const uint8_t*,size_t,esphome_api_probe_result_t*); bool esphome_api_codec_parse_entity(uint16_t,const uint8_t*,size_t,esphome_api_entity_t*); bool esphome_api_codec_parse_state(uint16_t,const uint8_t*,size_t,esphome_api_state_t*); bool esphome_api_codec_command(const esphome_api_command_t*,uint16_t*,uint8_t*,size_t,size_t*);
