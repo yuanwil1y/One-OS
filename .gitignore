@@ -1,0 +1,12 @@
+# ESP-IDF generated files
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
