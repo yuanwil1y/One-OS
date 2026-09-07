@@ -10,6 +10,37 @@ permissions:
   contents: read
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Home Assistant L2 host tests
+        run: tests/run_ha_l2_host_tests.sh
+      - name: ESPHome L2 host tests
+        run: tests/esphome_l2/run_host_tests.sh
+      - name: Theengs L2 host tests
+        run: firmware/components/theengs_l2/tests/run_host_tests.sh
+      - name: ZHA and zigpy L2 host tests
+        run: bash tests/host/run_zha_zigpy_host_tests.sh
+      - name: OpenThread L2 host tests
+        run: tests/run_openthread_l2_host_test.sh
+      - name: Kismet L2 host regression tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Itools/kismet_l2_host_tests/stub \
+            -Ifirmware/components/kismet_l2/include \
+            -Ifirmware/components/kismet_l2 \
+            tools/kismet_l2_host_tests/kismet_l2_host_test.c \
+            firmware/components/kismet_l2/kismet_wifi_tracker.c \
+            firmware/components/kismet_l2/kismet_wifi_decode.c \
+            firmware/components/kismet_l2/kismet_ble_tracker.c \
+            -o /tmp/kismet_l2_host_test
+          /tmp/kismet_l2_host_test
+      - name: Nmap L2 host tests
+        run: tests/host/run_nmap_l2_tests.sh
+      - name: Wireshark L2 host parser tests
+        run: make -C tests/host/wireshark_l2 test
+
   build:
     runs-on: ubuntu-latest
     steps:
