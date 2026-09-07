@@ -2,7 +2,7 @@ name: ESP-IDF build
 
 on:
   push:
-    branches: [main]
+    branches: [main, research/matter-chip-tool-l2-api]
   pull_request:
   workflow_dispatch:
 
@@ -10,14 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Matter L2 bounded host tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ifirmware/components/matter_l2/include \
+            firmware/components/matter_l2/matter_l2_bounds.c \
+            firmware/components/matter_l2/tests/test_bounds.c \
+            -o /tmp/matter_l2_bounds_test
+          /tmp/matter_l2_bounds_test
+      - name: Matter L2 ownership/security scope check
+        run: python3 tools/check_matter_l2_scope.py
+
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build ESP32-C6 firmware
+        with:
+          submodules: recursive
+      - name: Build and size ESP32-C6 firmware
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.1
           target: esp32c6
           path: firmware
-          command: idf.py build
+          command: idf.py build && idf.py size && idf.py size-components

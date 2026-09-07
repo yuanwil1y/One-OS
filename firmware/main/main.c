@@ -1,5 +1,6 @@
 #include "board.h"
 #include "lvgl_port.h"
+#include "matter_l2.h"
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -11,6 +12,9 @@ void app_main(void)
     board_lcd_handles_t lcd = {0};
     ESP_ERROR_CHECK(board_lcd_init(&lcd));
     ESP_ERROR_CHECK(lvgl_port_init(&lcd));
+
+    /* Pull the complete Matter L2 object into the final ELF without starting it. */
+    (void) chip_controller_is_ready();
 
     /* app_main is the single LVGL owner task in the foundation firmware. */
     for (;;) {
