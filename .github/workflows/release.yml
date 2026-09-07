@@ -1,0 +1,43 @@
+name: Release firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ESP32-C6 firmware and merged image
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32c6
+          path: firmware
+          command: idf.py build && idf.py merge-bin -o One-OS-merged.bin -f raw
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          image="One-OS-${GITHUB_REF_NAME}-merged.bin"
+          cp firmware/build/One-OS-merged.bin "dist/${image}"
+          (cd dist && sha256sum "${image}" > "${image}.sha256")
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/One-OS-${GITHUB_REF_NAME}-merged.bin \
+            dist/One-OS-${GITHUB_REF_NAME}-merged.bin.sha256 \
+            --target "${GITHUB_SHA}" \
+            --title "One-OS ${GITHUB_REF_NAME}" \
+            --generate-notes

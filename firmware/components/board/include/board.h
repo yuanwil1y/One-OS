@@ -55,17 +55,14 @@ esp_err_t board_lcd_init(board_lcd_handles_t *out_handles);
 /* Backlight is active-low through the board high-side switch. */
 esp_err_t board_backlight_set(bool on);
 
-/* Initialize I2C0 and attach the CST816 touch controller. */
-esp_err_t board_i2c_init(void);
+/* CST816 touch controller on the board I2C bus. */
 esp_err_t board_touch_init(void);
 esp_err_t board_touch_read(board_touch_sample_t *out_sample);
 
-/* Attach FATFS/SD over the already-owned SPI2 bus. */
+/* Attach FATFS/SD over the BSP-owned shared SPI2 bus. */
 esp_err_t board_sd_mount(bool format_if_mount_failed);
 esp_err_t board_sd_unmount(void);
-bool board_sd_is_mounted(void);
 sdmmc_card_t *board_sd_card(void);
-esp_err_t board_sd_format_fat(void);
 
 #ifdef __cplusplus
 }

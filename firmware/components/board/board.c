@@ -190,5 +190,6 @@ esp_err_t board_lcd_init(board_lcd_handles_t *out_handles)
         return err;
     }
 
-    return board_backlight_set(true);
+    /* Keep the panel dark until the LVGL display/input binding is ready. */
+    return ESP_OK;
 }

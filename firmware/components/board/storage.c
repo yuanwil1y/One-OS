@@ -60,20 +60,7 @@ esp_err_t board_sd_unmount(void)
     return esp_vfs_fat_sdcard_unmount(BOARD_SD_MOUNT_POINT, card);
 }
 
-bool board_sd_is_mounted(void)
-{
-    return s_card != NULL;
-}
-
 sdmmc_card_t *board_sd_card(void)
 {
     return s_card;
-}
-
-esp_err_t board_sd_format_fat(void)
-{
-    if (s_card == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return esp_vfs_fat_sdcard_format(BOARD_SD_MOUNT_POINT, s_card);
 }

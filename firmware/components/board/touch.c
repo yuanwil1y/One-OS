@@ -10,7 +10,7 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_cst816_dev;
 static bool s_touch_initialized;
 
-esp_err_t board_i2c_init(void)
+static esp_err_t board_i2c_init(void)
 {
     if (s_i2c_bus != NULL && s_cst816_dev != NULL) {
         return ESP_OK;
