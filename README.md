@@ -30,12 +30,13 @@ The canonical application-layer workflow is documented in:
 
 - [`docs/application/nearby-devices-browser-controller.md`](docs/application/nearby-devices-browser-controller.md)
 - [`docs/application/nearby-devices-product-rules.md`](docs/application/nearby-devices-product-rules.md)
+- [`docs/application/provisioning-web-management.md`](docs/application/provisioning-web-management.md)
 
-Both documents are required reading for Agents implementing the Nearby Devices application. The first defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. The second freezes the production storage and UX rules: the full Device DB lives on SD, unknown/unmatched devices remain visible with generic information, and the UI follows the Home Assistant-like blue/white card language established by the previous NearBy One NEXT UI.
+All three documents are required reading for Agents implementing the Nearby Devices application. The first defines the complete end-to-end path from multi-protocol environment scanning, parsing and integrated Device DB matching through HA Device/Entity materialization, LVGL presentation, Entity control dispatch and confirmed state updates. The second freezes the production storage and UX rules: the full Device DB lives on SD, unknown/unmatched devices remain visible with generic information, and the UI follows the Home Assistant-like blue/white card language established by the previous NearBy One NEXT UI. The third defines persistent Wi-Fi provisioning and Device DB import through the temporary SoftAP/Web Management portal, including the old NearBy One NEXT code that should be directly reused or adapted.
 
-If the main workflow guide contains an older recommendation that conflicts with `nearby-devices-product-rules.md` in those storage/unknown-device/UI areas, the product-rules document wins.
+If the main workflow guide contains an older recommendation that conflicts with `nearby-devices-product-rules.md` in storage/unknown-device/UI areas, the product-rules document wins. For provisioning, SoftAP/Web Management and database-upload behavior, `provisioning-web-management.md` is authoritative.
 
-Agents implementing application integration must read both documents before introducing scan orchestration, recognition, Device/Entity mapping, database storage, UI behavior or control routing.
+Agents implementing application integration must read all three documents before introducing scan orchestration, recognition, Device/Entity mapping, database storage, provisioning, Web Management, UI behavior or control routing.
 
 ## Source layout
 
