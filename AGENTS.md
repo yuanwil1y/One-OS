@@ -4,6 +4,8 @@
 
 This is a **takeover/finalization task**, not a restart.
 
+The external handoff prompt may be intentionally very short. **All implementation detail and completion criteria live in this AGENTS.md and are authoritative.** Do not ask the user to restate them.
+
 The previous `esp-matter -> connectedhomeip` integration path is now abandoned for this branch because it repeatedly failed against the One-OS ESP-IDF v6.1 baseline and was consuming effort on wrapper/framework compatibility rather than on the Matter controller itself.
 
 **New approved implementation direction:**
@@ -52,6 +54,23 @@ Before editing code, read:
   - `docs/application/provisioning-web-management.md`
 
 If `main` has moved, synchronize it into this branch first. Do not merge this research branch into `main` yourself.
+
+## Required migration order
+
+Execute the migration in this order unless a concrete compiler dependency forces a small reordering:
+
+1. establish direct `connectedhomeip` submodule/component integration and remove `esp-matter` from CMake/component dependencies;
+2. bring up CHIP platform/controller lifecycle without device/server data model;
+3. preserve CASE through native `DeviceCommissioner::GetConnectedDevice()` or the exact matching API in the pinned revision;
+4. migrate Read + bounded Node Probe to direct `ReadClient`;
+5. migrate Write to native `WriteClient` with bounded TLV/value encoding;
+6. migrate Invoke to native `CommandSender`/matching controller command API;
+7. migrate Subscribe/Unsubscribe to direct subscription-mode `ReadClient`;
+8. migrate on-network, BLE+Wi-Fi and BLE+Thread commissioning to native `DeviceCommissioner`/`AutoCommissioner` APIs;
+9. fix cancel/lifetime/secret-wipe semantics;
+10. remove all remaining esp-matter references/submodule/config, then run combined host tests and full ESP32-C6 build/size CI.
+
+Do not stop between these stages to ask for approval. Continue until the software completion gate is met or a concrete upstream blocker is demonstrated.
 
 ## What to preserve from the current Matter candidate
 
