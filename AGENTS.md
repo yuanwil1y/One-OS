@@ -2,20 +2,31 @@
 
 ## Status
 
-Phase 1 research is complete and the Matter implementation is already substantially present on this branch. This is a **takeover/finalization task**, not a restart.
+This is a **takeover/finalization task**, not a restart.
 
-Current known candidate before takeover:
+Current branch state at handoff:
 
 - branch: `research/matter-chip-tool-l2-api`
-- candidate commit: `391f54b6862feb686dbd38a8cb439c94844d4c36`
-- bounded host tests: passed
-- ownership/security scope check: passed
-- ESP32-C6 build: failed
+- current HEAD: `e3bbe157bb934b7d94508d7a80afa9b30cce0e78`
+- latest `main`: already merged into this branch; current branch is ahead of `main` and not behind it
+- esp-matter pin: `espressif/esp-matter@b5dd92663ba67dcac214fe964b56b0bb87333939` from `release/v1.6.1`
+- connectedhomeip revision: `539342f32d...` as pinned by that esp-matter revision
+- all combined host tests for HA, ESPHome, Theengs, ZHA/zigpy, OpenThread, Kismet, Nmap, Wireshark and Matter: **PASS**
+- Matter ownership/security scope check: **PASS**
+- latest ESP-IDF v6.1 / ESP32-C6 build: **FAIL**
+- latest failing workflow run: `34156699845`
 - physical hardware validation: **not required**
 
-The other eight approved L2 families have already been integrated into `main`. Before modifying Matter code, synchronize this branch with the latest `origin/main` and preserve those integrated components and their configuration.
+The previous takeover already did two useful things:
 
-Read root `README.md`, this file, `docs/research/matter-chip-tool-l2-api.md`, and the canonical application docs on current `main`:
+1. synchronized the Matter branch with the integrated eight-family `main`;
+2. removed repository-wide format-warning suppression during conflict resolution and pinned esp-matter to the immutable `release/v1.6.1` head.
+
+Do not redo those steps unless `main` has actually moved again.
+
+Important: esp-matter `release/v1.6.1` still documents/recommends ESP-IDF `v6.0.2`. Therefore the new pin is **not proof of ESP-IDF v6.1 compatibility**. The remaining job is to diagnose and fix the real v6.1 compile/link incompatibility, not to keep changing versions blindly.
+
+Read root `README.md`, this file, `docs/research/matter-chip-tool-l2-api.md`, and the canonical application docs on current `main` before editing code:
 
 - `docs/application/nearby-devices-browser-controller.md`
 - `docs/application/nearby-devices-product-rules.md`
@@ -23,19 +34,18 @@ Read root `README.md`, this file, `docs/research/matter-chip-tool-l2-api.md`, an
 
 ## Immediate takeover tasks
 
-1. Synchronize latest `origin/main` into this research branch. Resolve shared `CMakeLists.txt`, `sdkconfig.defaults`, partition, CI, and `main` conflicts by preserving the already-integrated eight-family main behavior plus only the Matter additions actually required.
-2. Do **not** replace, remove, wrap, or refactor HA, ESPHome, Theengs, ZHA/zigpy, OpenThread, Kismet, Nmap, or Wireshark while fixing Matter.
-3. Reproduce the Matter ESP32-C6 CI failure against the repository's real baseline: ESP-IDF v6.1 / ESP32-C6.
-4. Continue fixing compile/link errors until `idf.py build`, `idf.py size`, and `idf.py size-components` complete successfully. Do not stop after the first compiler error to ask for approval.
-5. Keep the One-OS ESP-IDF baseline at v6.1 unless the user explicitly approves changing it.
-6. The currently pinned esp-matter revision documents ESP-IDF v6.0.2 as its supported/recommended baseline. Therefore do not assume that revision is compatible with v6.1. Determine a supported or minimally adapted esp-matter/connectedhomeip integration that actually compiles with One-OS v6.1. If changing the pinned upstream revision is necessary, document exactly why and keep the change pinned and reproducible.
-7. Do not silently switch to an arbitrary Matter development branch merely because it builds. Preserve the approved Matter scope and report the selected upstream revision and compatibility rationale.
+1. Start from current HEAD. Do not rewrite the Matter component from scratch.
+2. Inspect the latest failing ESP32-C6 workflow `34156699845` and capture the **first real compiler/linker error**, including the source file, symbol/API and diagnostic text.
+3. Reproduce/fix errors against the repository baseline: **ESP-IDF v6.1 + ESP32-C6**.
+4. Iterate continuously through all subsequent compile/link errors until `idf.py build`, `idf.py size`, and `idf.py size-components` succeed. Do not stop after one or two fixes to ask for approval.
+5. Keep One-OS on ESP-IDF v6.1. Do not downgrade the project to v6.0.2.
+6. Do not keep repinning esp-matter without evidence. The current `release/v1.6.1` pin is acceptable as a starting point. Change it only if the actual compiler/API evidence shows that a different **pinned, reproducible, non-arbitrary** upstream revision is necessary for v6.1.
+7. If an upstream API changed between the esp-matter-supported IDF baseline and IDF v6.1, prefer a narrow compatibility adaptation in the Matter integration over repository-wide compiler weakening or modification of unrelated L2 families.
+8. Preserve all eight already-integrated L2 families and their combined tests/configuration.
 
 ## Approved Matter ownership
 
-Matter/CHIP owns protocol/controller operations **after the application has identified a Matter candidate**.
-
-Owned here:
+Matter/CHIP owns only protocol/controller operations after the application identifies a Matter candidate:
 
 - controller initialization/shutdown and persisted single-controller/fabric state;
 - CASE path for already-authorized operational nodes;
@@ -44,9 +54,9 @@ Owned here:
 - Write;
 - Invoke;
 - Subscribe/Unsubscribe;
-- explicit user-triggered commissioning workflows.
+- explicit user-triggered commissioning.
 
-Target public APIs include:
+Public APIs already present include:
 
 ```c
 chip_controller_init(...);
@@ -64,91 +74,89 @@ chip_commission_ble_wifi(...);
 chip_commission_ble_thread(...);
 ```
 
-Do not implement generic BLE scanning, generic mDNS/DNS-SD scanning, a duplicate Matter candidate scanner/matcher, Thread network management, HA Device/Entity logic, or a separate Matter recognition DB.
+Do not implement generic BLE scanning, generic mDNS/DNS-SD scanning, Matter candidate matching, Thread network management, HA Device/Entity logic, or a separate recognition DB.
 
 No Matter L2 code may call or depend on another One-OS L2 family.
 
-## Preserve and finish the existing implementation
+## Preserve the existing implementation
 
-Do not throw away the current candidate merely because CI fails. Inspect and repair it.
+The existing `firmware/components/matter_l2/` candidate already contains real connectedhomeip/esp-matter code for Controller/Fabric, CASE, bounded `ReadClient` Node Probe, Read, Write, Invoke, Subscribe and Commissioning.
 
-The existing implementation already contains controller/fabric handling, CASE-based operations, bounded `ReadClient` node probing, Read/Write/Invoke, subscriptions and commissioning. Keep real connectedhomeip/esp-matter code paths; do not replace them with placeholders, fake success, or test-only stubs.
+Do not replace it with placeholders, fake success paths, mock production code, or a Linux `chip-tool` port.
 
-### Bounded memory requirement
+### Bounded memory
 
-`matter_node_probe()` must remain fixed-capacity/bounded.
+`matter_node_probe()` must remain fixed-capacity and streaming:
 
-- Do not use `BufferedReadCallback` or application-owned unbounded `std::vector` whole-list accumulation.
-- Prefer lower-level `ReadClient::Callback` streaming directly into fixed-capacity results.
-- On overflow, return partial/truncated state rather than growing memory.
-- Upstream internal temporary CHIP allocations may exist; document them rather than duplicating unbounded accumulation in One-OS.
+- no `BufferedReadCallback` whole-list buffering;
+- no application-owned unbounded `std::vector` accumulation;
+- stream list elements through `ReadClient::Callback` into fixed-capacity result structures;
+- overflow returns partial/truncated state.
 
-### Cancellation and secret handling fixes
+### Cancellation and sensitive buffers still require review
 
-Review and fix the current candidate's completion/cancellation semantics before finalizing:
+The current source still needs final review/fix for these semantics while build compatibility is being repaired:
 
-- `chip_request_cancel()` and commissioning cancellation must produce exactly one terminal user callback with `CHIP_STATUS_CANCELLED` where a callback has been accepted.
-- Timeout, cancellation, CASE failure, IM failure and normal completion must not double-call callbacks or prematurely reuse a slot while an upstream transaction can still call back.
-- Commissioning cancellation must not simply stop pairing and silently drop the caller callback.
-- Explicitly clear sensitive temporary buffers when they are no longer needed, including stored Wi-Fi commissioning passwords, Thread operational datasets, IPK/NOC-related scratch material where applicable.
-- Never log credentials, setup PIN material, IPK, private CA material, Wi-Fi password or Thread dataset bytes.
+- commissioning cancellation must deliver exactly one terminal `CHIP_STATUS_CANCELLED` callback after a request has been accepted;
+- cancellation/timeout/failure/success paths must not double-call callbacks;
+- request/subscription slots must not be reused while an upstream transaction can still callback into them;
+- clear the full stored Wi-Fi password buffer when commissioning state is reset/finished;
+- clear the full Thread operational dataset buffer when reset/finished;
+- clear IPK/NOC/other credential scratch buffers where applicable after use;
+- never log setup PINs, Wi-Fi passwords, Thread datasets, IPK, private CA material or credential bytes.
+
+Do not postpone these fixes merely because they are not the first compile error.
 
 ## Build hygiene
 
-Do not solve Matter compatibility by weakening the entire One-OS compiler configuration.
+Do not fix Matter by weakening the whole repository.
 
-In particular, do not leave repository-wide suppressions such as:
+Forbidden repository-wide workarounds include:
 
 ```text
 -Wno-format-security
 -Wformat=0
 ```
 
-If an upstream CHIP target requires a warning workaround, scope it as narrowly as possible to the Matter/CHIP target and document it.
+If a specific upstream CHIP source genuinely needs a warning workaround, scope it to the narrowest target and document why.
 
-Do not replace main's combined eight-family CI with a Matter-only CI. Extend/preserve combined host tests and ESP32-C6 build validation so the final branch proves Matter coexists with the other integrated families.
+Do not replace the combined CI with Matter-only validation. Final Matter branch CI must keep all previously integrated host tests plus Matter tests.
 
-## Physical hardware is not a completion gate
+## Hardware is not a completion gate
 
-Do **not** wait for or request:
+Do not wait for or request:
 
-- Waveshare ESP32-C6 hardware;
+- Waveshare hardware;
 - serial access;
-- a pre-provisioned controller Fabric;
-- a live Matter target;
-- live CASE/ACL interoperability data;
-- runtime free-heap/HWM measurements.
+- a live Matter device;
+- a pre-provisioned Fabric;
+- live CASE/ACL validation;
+- free-heap or task-HWM measurements.
 
-Unavailable runtime-only values must be reported as `NOT_MEASURED`. They are not blockers.
+Unavailable runtime values are `NOT_MEASURED`, never blockers.
 
-The completion gate is software-only:
+## Completion gate
 
-- latest main synchronized;
-- current Matter implementation reviewed/fixed;
-- bounded host/unit tests pass;
-- ownership/security scope checks pass;
-- real ESP-IDF v6.1 / ESP32-C6 compile and link pass;
-- `idf.py size` and `idf.py size-components` complete;
-- combined main + Matter CI passes;
-- no branch-specific `AGENTS.md` or temporary CI trigger should be proposed for main integration.
+Finish only when all software conditions are satisfied:
 
-## Safety
+- branch still includes current `main`;
+- existing Matter APIs remain implemented with real SDK paths;
+- all combined host tests pass;
+- Matter scope/security check passes;
+- ESP-IDF v6.1 / ESP32-C6 compile and link pass;
+- `idf.py size` and `idf.py size-components` pass;
+- cancellation and sensitive-buffer issues above are resolved;
+- no global compiler-security weakening is introduced.
 
-Only authorized Matter sessions, reads, writes, subscriptions and explicit commissioning are in scope. No credential theft, authentication/attestation bypass, session hijacking, exploit delivery, unauthorized persistence or destructive behavior.
-
-## Completion and handoff
-
-Work continuously through build errors until the software completion gate is satisfied or there is a concrete upstream/toolchain blocker that cannot be resolved without changing a user-approved architecture decision.
-
-Commit all fixes on `research/matter-chip-tool-l2-api`, then report:
+Commit all fixes on `research/matter-chip-tool-l2-api` and report:
 
 - final commit SHA;
-- selected esp-matter and connectedhomeip revisions;
-- APIs implemented;
-- host/unit/scope test results;
-- ESP-IDF v6.1 / ESP32-C6 build result;
-- `idf.py size` / `size-components` results;
-- runtime-only values as `NOT_MEASURED` when unavailable;
-- any remaining blocker with the exact compiler/linker/API error.
+- esp-matter and connectedhomeip revisions;
+- the concrete build incompatibilities fixed;
+- host/scope test results;
+- ESP32-C6 build result;
+- size/size-components result;
+- runtime-only values as `NOT_MEASURED`;
+- any truly unresolved blocker with the exact diagnostic.
 
-Do **not** merge this branch into `main` yourself. Final main integration is performed separately after review.
+Do not merge this branch into `main` yourself.
