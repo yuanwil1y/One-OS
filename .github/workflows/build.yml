@@ -55,8 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout connectedhomeip ESP32 dependencies
+        run: |
+          git submodule update --init --depth 1 third_party/connectedhomeip
+          python3 third_party/connectedhomeip/scripts/checkout_submodules.py \
+            --platform esp32 --shallow --jobs 8
       - name: Build and size ESP32-C6 firmware
         uses: espressif/esp-idf-ci-action@v1
         with:
