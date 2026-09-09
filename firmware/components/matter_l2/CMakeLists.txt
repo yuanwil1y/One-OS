@@ -5,6 +5,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES
         chip
+        mbedtls
         nvs_flash
         esp_timer
         esp_event
