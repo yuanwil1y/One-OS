@@ -66,4 +66,4 @@ jobs:
           esp_idf_version: v6.1
           target: esp32c6
           path: firmware
-          command: cd ../third_party/connectedhomeip && source scripts/activate.sh -p esp32 && CHIP_GN_DIR="$(dirname "$(command -v gn)")" && cd ../../firmware && source /opt/esp/idf/export.sh >/dev/null && export PATH="${CHIP_GN_DIR}:${PATH}" && idf.py build && idf.py size && idf.py size-components
+          command: apt-get update && apt-get install -y python3-dev && cd ../third_party/connectedhomeip && source scripts/activate.sh -p esp32 && CHIP_GN_DIR="$(dirname "$(command -v gn)")" && cd ../../firmware && source /opt/esp/idf/export.sh >/dev/null && export PATH="${CHIP_GN_DIR}:${PATH}" && idf.py build && idf.py size && idf.py size-components
