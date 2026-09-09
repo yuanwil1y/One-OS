@@ -10,6 +10,6 @@ set(EXTRA_COMPONENT_DIRS
 
 project(one_os)
 
-idf_build_set_property(CXX_COMPILE_OPTIONS "-std=gnu++17;-Os;-DCHIP_HAVE_CONFIG_H" APPEND)
+idf_build_set_property(CXX_COMPILE_OPTIONS "-std=gnu++17;-Os;-DCHIP_HAVE_CONFIG_H;-Wno-error=format" APPEND)
 idf_build_set_property(C_COMPILE_OPTIONS "-Os" APPEND)
 idf_build_set_property(COMPILE_OPTIONS "-D_NO_GENERIC_THREAD_NETWORK_COMMISSIONING_DRIVER_" APPEND)
