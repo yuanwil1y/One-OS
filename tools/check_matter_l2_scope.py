@@ -21,11 +21,13 @@ FORBIDDEN = {
     "theengs_": "Matter L2 must not call Theengs L2",
     "esphome_": "Matter L2 must not call ESPHome L2",
     "ExampleOperationalCredentialsIssuer": "production code must not use the connectedhomeip test issuer",
+    "esp_matter": "Matter L2 must use connectedhomeip Controller APIs directly",
+    "esp-matter": "Matter L2 source must not retain the abandoned framework dependency",
 }
 
 bad = []
 for path in COMPONENT.rglob("*"):
-    if path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp"}:
+    if path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp", ".inc"}:
         continue
     text = path.read_text(encoding="utf-8")
     for token, reason in FORBIDDEN.items():

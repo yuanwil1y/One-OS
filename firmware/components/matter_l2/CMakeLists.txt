@@ -4,10 +4,10 @@ idf_component_register(
         "matter_l2_bounds.c"
     INCLUDE_DIRS "include"
     REQUIRES
-        esp_matter
-        esp_matter_controller
+        chip
         nvs_flash
         esp_timer
+        esp_event
         freertos
 )
 

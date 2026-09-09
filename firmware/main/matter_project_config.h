@@ -2,11 +2,8 @@
 
 #include <sdkconfig.h>
 
-#ifndef CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
-#ifdef CONFIG_ESP_MATTER_COMMISSIONER_ENABLE
-/* One-OS receives Matter candidates from other application-owned L2 evidence. */
+/* Matter candidates are application-owned; controller L2 never scans for them. */
 #define CHIP_DEVICE_CONFIG_ENABLE_COMMISSIONER_DISCOVERY 0
-#endif
 
+/* Bound controller CASE/session bookkeeping to the One-OS embedded use case. */
 #define CHIP_CONFIG_CONTROLLER_MAX_ACTIVE_DEVICES 8
-#endif
