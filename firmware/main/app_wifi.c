@@ -880,3 +880,266 @@ bool wifi_mgr_has_ip(void)
     unlock();
     return has_ip;
 }
+
+/* ---------------- temporary provisioning access point ---------------- */
+
+/*
+ * The AP is a second, short-lived owner of the same driver.
+ *
+ * It is deliberately not a second lifecycle: this code runs only between
+ * wifi_mgr_release_for_scan() and wifi_mgr_restore_after_scan(), which is the window
+ * in which the driver is already down and the station has explicitly given it up.
+ * The AP therefore never initialises the driver on top of a live station, and the
+ * station never comes back until the AP is stopped.
+ *
+ * `s_ctx.driver_up` is used for the AP as well, because from this module's point of
+ * view the question is the same one: is the driver initialised? What differs is the
+ * mode and who asked for it, and that is what `s_ap_up` records.
+ */
+static bool s_ap_up;
+static esp_netif_t *s_ap_netif;
+static SemaphoreHandle_t s_ap_events;
+
+/* Wi-Fi event handler for the AP side. Registered only while the AP is up, and
+ * unregistered when it stops, so the station handler stays the only permanent one. */
+static void on_ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)data;
+    if (base != WIFI_EVENT) {
+        return;
+    }
+    if (id == WIFI_EVENT_AP_STACONNECTED || id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (s_ap_events != NULL) {
+            (void)xSemaphoreGive(s_ap_events);
+        }
+    }
+}
+
+bool wifi_mgr_ap_is_up(void)
+{
+    bool up;
+
+    lock_init();
+    lock();
+    up = s_ap_up;
+    unlock();
+    return up;
+}
+
+esp_err_t wifi_mgr_ap_ipv4(char *out, size_t out_size)
+{
+    esp_netif_ip_info_t info;
+
+    if (out == NULL || out_size == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+
+    lock_init();
+    lock();
+    if (!s_ap_up || s_ap_netif == NULL) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (esp_netif_get_ip_info(s_ap_netif, &info) != ESP_OK) {
+        unlock();
+        return ESP_FAIL;
+    }
+    (void)snprintf(out, out_size, IPSTR, IP2STR(&info.ip));
+    unlock();
+    return ESP_OK;
+}
+
+esp_err_t wifi_mgr_ap_start(const char *ssid, const char *password)
+{
+    wifi_config_t config;
+    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    bool netif_created = false;
+    bool handler_registered = false;
+    esp_err_t err;
+
+    if (ssid == NULL || ssid[0] == '\0' || strlen(ssid) > WIFI_MGR_SSID_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (password == NULL) {
+        password = "";
+    }
+    if (strlen(password) > WIFI_MGR_PASSWORD_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /*
+     * WPA2 requires at least eight characters. Rather than silently starting an open
+     * AP when a short password is given - which would hand the provisioning portal to
+     * anything in range - a short password is refused. The generator never produces
+     * one, so this is a guard against a future caller, not against the current one.
+     */
+    if (password[0] != '\0' && strlen(password) < 8u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock_init();
+    lock();
+
+    if (s_ap_up) {
+        unlock();
+        return ESP_OK;
+    }
+    if (s_ctx.quarantined) {
+        s_ctx.state = WIFI_MGR_QUARANTINED;
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_started_api) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    /*
+     * The station must have given the driver up first. If it has not, the caller
+     * skipped the handover, and initialising the driver here would reinitialise one
+     * the station is using.
+     */
+    if (s_ctx.driver_up) {
+        unlock();
+        ESP_LOGE(TAG, "AP start refused: the station still owns the driver");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    err = ensure_event_and_netif();
+    if (err != ESP_OK) {
+        unlock();
+        return err;
+    }
+
+    /* The AP interface itself. Created on demand and destroyed on stop, so an AP that
+     * is not running costs nothing. */
+    if (s_ap_netif == NULL) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        if (s_ap_netif == NULL) {
+            unlock();
+            return ESP_FAIL;
+        }
+        netif_created = true;
+    }
+
+    if (s_ap_events == NULL) {
+        s_ap_events = xSemaphoreCreateBinary();
+        if (s_ap_events == NULL) {
+            if (netif_created) {
+                esp_netif_destroy(s_ap_netif);
+                s_ap_netif = NULL;
+            }
+            unlock();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_ap_event, NULL);
+    if (err != ESP_OK) {
+        if (netif_created) {
+            esp_netif_destroy(s_ap_netif);
+            s_ap_netif = NULL;
+        }
+        unlock();
+        return err;
+    }
+    handler_registered = true;
+
+    memset(&config, 0, sizeof(config));
+    (void)app_strlcpy((char *)config.ap.ssid, ssid, sizeof(config.ap.ssid));
+    config.ap.ssid_len = (uint8_t)strlen(ssid);
+    config.ap.channel = 1u;
+    config.ap.max_connection = 2u; /* one operator, one phone; not a hotspot */
+    config.ap.authmode = (password[0] != '\0') ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    if (password[0] != '\0') {
+        (void)app_strlcpy((char *)config.ap.password, password,
+                          sizeof(config.ap.password));
+    }
+    config.ap.pmf_cfg.required = false;
+
+    err = esp_wifi_init(&init_cfg);
+    if (err != ESP_OK) {
+        goto rollback;
+    }
+    /*
+     * From here the driver exists, so any later failure must deinitialise it. The
+     * rollback path keys off `driver_up`, which is why it is set immediately after
+     * init rather than waiting for a successful start.
+     */
+    s_ctx.driver_up = true;
+
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_mode(WIFI_MODE_AP);
+    }
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_AP, &config);
+    }
+    if (err == ESP_OK) {
+        err = esp_wifi_start();
+    }
+    /* The credential copy is cleared as soon as the driver has taken its own, so it
+     * does not linger in a stack frame. */
+    memset(&config, 0, sizeof(config));
+    if (err != ESP_OK) {
+        goto rollback;
+    }
+
+    s_ap_up = true;
+    /* New driver generation: any event still queued from the previous one is stale. */
+    event_epoch_bump();
+    s_ctx.state = WIFI_MGR_UNCONFIGURED; /* the AP is not a station connection */
+    clear_ip();
+
+    unlock();
+    ESP_LOGI(TAG, "provisioning AP started (ssid set, credentials not logged)");
+    return ESP_OK;
+
+rollback:
+    memset(&config, 0, sizeof(config));
+    (void)esp_wifi_stop();
+    (void)esp_wifi_deinit();
+    s_ctx.driver_up = false;
+    if (handler_registered) {
+        (void)esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_ap_event);
+    }
+    if (netif_created) {
+        esp_netif_destroy(s_ap_netif);
+        s_ap_netif = NULL;
+    }
+    unlock();
+    ESP_LOGE(TAG, "provisioning AP start failed: %s", esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t wifi_mgr_ap_stop(void)
+{
+    bool was_up;
+
+    lock_init();
+    lock();
+    was_up = s_ap_up;
+    s_ap_up = false;
+
+    if (s_ctx.driver_up) {
+        /*
+         * Down regardless of who started it. This function is only reached through
+         * app_provision_stop(), which owns the session that started the AP, so the
+         * driver being up here means it is the AP's.
+         */
+        (void)esp_wifi_stop();
+        (void)esp_wifi_deinit();
+        s_ctx.driver_up = false;
+    }
+    if (was_up) {
+        (void)esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_ap_event);
+    }
+    if (s_ap_netif != NULL) {
+        esp_netif_destroy(s_ap_netif);
+        s_ap_netif = NULL;
+    }
+    unlock();
+    /* Give the station its radio back through the ordinary path, so a failed
+     * reconnect is reported exactly like any other. */
+    return ESP_OK;
+}

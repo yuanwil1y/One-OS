@@ -148,6 +148,40 @@ esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *password);
 /* Remove stored credentials. */
 esp_err_t wifi_mgr_clear_credentials(void);
 
+/*
+ * Temporary provisioning access point.
+ *
+ * The portal needs an AP for the length of one session. It is offered here rather
+ * than by the portal so there is still exactly one Wi-Fi lifecycle owner: the portal
+ * asks for an AP and this module decides how the driver gets there.
+ *
+ * Ordering contract, enforced by app_provision.c:
+ *
+ *   wifi_mgr_release_for_scan()   - orderly handover, driver down
+ *     wifi_mgr_ap_start()         - driver up in AP mode with the given credentials
+ *     wifi_mgr_ap_stop()          - driver down again
+ *   wifi_mgr_restore_after_scan() - reconnect the station
+ *
+ * The handover is what makes this safe: the driver is not initialised when the AP
+ * starts, and the station is not brought up until the AP is down. There is therefore
+ * never a moment where two owners both believe they hold the driver, and the AP
+ * never reconfigures a live station out from under it.
+ *
+ * ap_start refuses while the radio is quarantined, for the same reason every other
+ * entry point does: a session whose teardown timed out still owns the driver and will
+ * deinitialise it.
+ */
+esp_err_t wifi_mgr_ap_start(const char *ssid, const char *password);
+esp_err_t wifi_mgr_ap_stop(void);
+
+/* The soft-AP interface's IPv4 address as a string, or an empty string when the AP is
+ * not up. This is what /api/status reports so the operator knows where to point a
+ * browser, which is the only thing the AP address is for. */
+esp_err_t wifi_mgr_ap_ipv4(char *out, size_t out_size);
+
+/* True while the soft AP is running. */
+bool wifi_mgr_ap_is_up(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -133,17 +133,23 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | `app_db_import.{c,h}` | 数据库替换状态机：分块流式写入、双重长度校验、容量与空间预检、`.part` 清理、**全量校验后才替换**、失败回滚；FAT 无原子 rename，因此序列设计为任意中断点都可恢复 | `app_db_import` 150 checks |
 | `app_portal.{c,h}` | 请求/响应线层：表单解码（含 `%00` 拒绝）、Content-Length 解析、JSON 构建（SSID 十六进制、无密码字段、缓冲区不足则**什么都不写**）、临时 AP 密码生成 | `app_portal` 95 checks |
 | `app_provision.{c,h}` | 会话编排：操作门互斥、射频交接顺序与回滚、会话超时、**替换期间关闭并重开 reader**、令牌恒定时间比较 | `app_provision` 120 checks |
+| `wifi_mgr_ap_*`（`app_wifi.c`） | 临时配网 AP：只在 `release_for_scan` 与 `restore_after_scan` 之间运行，所以驱动不会在活着的 STA 上被重新初始化；短于 8 字符的密码被拒绝而不是静默降级成开放 AP；射频被隔离时拒绝启动 | **无 host 测试**（ESP-IDF 专属），只有目标构建证明它能编译 |
 
 ### B6 未完成项
 
 1. **HTTP 路由与处理器**（`/api/status`、`/api/wifi/scan`、`/api/wifi/connect`、`/api/db/upload`、
-   可选 `/api/portal/finish`）。线层与会话逻辑已就绪，处理器应当是薄传输层。
-2. **临时 APSTA 会话**：`app_wifi` 目前只有 STA；需要 AP 启动/停止与 STA 恢复的配对实现。
-3. **AP 密码的本地出口**：按产品规则只在设备自身呈现与本地串口输出，不得进入日志或
-   `/api/status`。目前生成逻辑已实现并测试，出口未接。
-4. **NVS 凭据持久化**：`app_wifi` 已实现 `wifi_mgr_set_credentials`/`clear`/启动加载，
+   可选 `/api/portal/finish`）。线层（`app_portal`）与会话逻辑（`app_provision`）已就绪，
+   处理器应当是薄传输层。
+2. **AP 密码的本地出口**：按产品规则只在设备自身呈现与本地串口输出，不得进入日志或
+   `/api/status`。生成逻辑已实现并测试，出口未接。
+3. **NVS 凭据持久化**：`app_wifi` 已实现 `wifi_mgr_set_credentials`/`clear`/启动加载，
    但"连接失败后保留凭据以便重试"与"版本标记"未验证。
+4. **`/api/status` 尚未接 `app_runtime_db_state()`**（库状态与版本已可取）。
 5. **实板全部未做**：无板、无浏览器、无真实 HTTP 服务器。
+
+**关于 `wifi_mgr_ap_*` 的证据等级**：它是本轮唯一完全没有自动化测试覆盖的产物。
+host 测试无法编译 ESP-IDF 专属代码，所以它只有"目标构建通过"这一项证据，
+AP 实际能否启动、STA 能否在其后恢复，**都未验证**。
 
 
 ## 5. 本轮修掉的四个边界问题
