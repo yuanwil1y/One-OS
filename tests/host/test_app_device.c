@@ -114,7 +114,7 @@ static void test_unknown_wifi_device_kept_and_read_only(void)
     app_device_generation_begin(1u);
 
     feed_wifi(&ev, bssid, "LivingRoomAP", -55, 6u, 1000u);
-    CHECK(app_device_materialize(&ev, &truncated) == 1u, "one device materialized");
+    CHECK(app_device_materialize(&ev, NULL, &truncated) == 1u, "one device materialized");
     CHECK(!truncated, "nothing truncated");
 
     CHECK(app_device_count() == 1u, "one binding, got %u", (unsigned)app_device_count());
@@ -150,7 +150,7 @@ static void test_entities_are_only_exact_protocol_facts(void)
     app_device_generation_begin(1u);
 
     feed_wifi(&ev, bssid, "AP", -60, 11u, 500u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     binding = app_device_at(0u);
     CHECK(binding != NULL, "binding exists");
 
@@ -200,7 +200,7 @@ static void test_no_entity_when_no_meaningful_value(void)
     /* An advertisement we could not parse gives a device identity but no
      * protocol fact beyond RSSI. TX power must not be fabricated. */
     feed_ble(&ev, addr, 0u, NULL, -70, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_find("sensor.ble_00112233445566_tx_power") == NULL,
           "tx_power must not exist when it was not advertised");
@@ -220,7 +220,7 @@ static void test_tx_power_entity_only_when_advertised(void)
     app_device_generation_begin(1u);
 
     feed_ble(&ev, addr, 0u, "Beacon", -40, true, 4, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_find(id) != NULL, "tx_power entity exists when advertised");
     {
@@ -242,7 +242,7 @@ static void test_same_bytes_different_protocol_are_different_devices(void)
 
     feed_wifi(&ev, mac, "SomeAP", -50, 1u, 100u);
     feed_ble(&ev, mac, 0u, "SomeBLE", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     /* Identical bytes in Wi-Fi and BLE must not be merged into one physical
      * device: there is no safe cross-protocol identity rule for that. */
@@ -268,7 +268,7 @@ static void test_ble_address_type_is_part_of_identity(void)
 
     feed_ble(&ev, addr, 0u, "Type0", -50, false, 0, 100u);
     feed_ble(&ev, addr, 1u, "Type1", -50, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() == 2u,
           "public and random address with same bytes are different devices, got %u",
@@ -290,7 +290,7 @@ static void test_repeat_materialize_does_not_grow(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, bssid, "AP", -50, 1u, 100u);
     for (int i = 0; i < 5; ++i) {
-        (void)app_device_materialize(&ev, &truncated);
+        (void)app_device_materialize(&ev, NULL, &truncated);
         CHECK(app_device_count() == 1u, "repeat %d kept one device, got %u", i,
               (unsigned)app_device_count());
         CHECK(app_entity_count() == 3u, "repeat %d kept three entities, got %u", i,
@@ -349,6 +349,30 @@ static app_scan_status_t scan_report_none(void)
     return scan;
 }
 
+/*
+ * Freshness model, and what these tests pin.
+ *
+ * "The stage reached DONE" means the protocol was covered, not that every device
+ * in range was seen: one RF report can be lost for reasons that have nothing to do
+ * with the device leaving. So a device that a fully covered protocol did not
+ * report is not removed straight away. It becomes STALE on the first such
+ * generation - visible, with its identity and entities intact - and is removed
+ * only on the second consecutive one.
+ *
+ * Two states and one counter carry this:
+ *
+ *   ONLINE       any source reported it this generation
+ *   STALE        nobody did, and every source that has seen it was fully covered:
+ *                absence is real evidence, but not yet proof
+ *   UNAVAILABLE  nobody did, and at least one such source was skipped, failed,
+ *                cancelled or only partial: "we could not look", which is weaker
+ *                than "we looked and it was gone". A persistent authorized
+ *                identity stays here rather than being removed at all.
+ *
+ * `miss_rounds` counts consecutive fully covered misses and is reset by any
+ * sighting, so a device that flickers in and out cannot accumulate its way to
+ * removal while it is still present.
+ */
 static void test_generation_sweeps_unseen_ephemeral(void)
 {
     app_scan_evidence_t ev;
@@ -366,7 +390,7 @@ static void test_generation_sweeps_unseen_ephemeral(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, a, "AP-A", -50, 1u, 100u);
     feed_wifi(&ev, b, "AP-B", -60, 6u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     CHECK(app_device_count() == 2u, "two devices in generation 1");
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -377,17 +401,54 @@ static void test_generation_sweeps_unseen_ephemeral(void)
               "seen device is online");
     }
 
-    /* Generation 2 sees only A: B must be swept, not accumulated. */
+    /* Generation 2 sees only A. B is missing under complete Wi-Fi coverage, which
+     * is real evidence - but one missed report is not a departure, so B is kept
+     * and marked STALE rather than deleted. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_wifi(&ev, a, "AP-A", -52, 1u, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
 
-    CHECK(app_device_count() == 1u,
-          "stale ephemeral device must be swept, got %u", (unsigned)app_device_count());
+    CHECK(app_device_count() == 2u,
+          "one missed report must not delete a device, got %u",
+          (unsigned)app_device_count());
     CHECK(app_device_find("wifi_100000000001") != NULL, "still-seen device kept");
+    {
+        const app_device_binding_t *b_binding = app_device_find("wifi_100000000002");
+        CHECK(b_binding != NULL && b_binding->availability == APP_AVAILABILITY_STALE,
+              "unseen device marked STALE, got %s",
+              b_binding ? app_availability_name(b_binding->availability) : "absent");
+        CHECK(b_binding != NULL && b_binding->miss_rounds == 1u,
+              "one consecutive miss recorded");
+    }
+    /* A stale device keeps its identity and its entities: they are exactly what a
+     * returning device needs, and deleting them would renumber the entity table on
+     * every RF hiccup. */
+    CHECK(ha_core_device_get("wifi_100000000002") != NULL,
+          "the stale device is still in ha_core");
+    CHECK(app_entity_count_for_device("wifi_100000000002") > 0u,
+          "the stale device keeps its entities");
+    {
+        const ha_entity_t *e =
+            ha_core_entity_get("sensor.wifi_100000000002_signal_strength");
+        CHECK(e != NULL && !e->available,
+              "and its entities are no longer reported available");
+    }
+
+    /* Generation 3 sees only A again: the second consecutive miss under complete
+     * coverage removes B. */
+    app_scan_evidence_reset(&ev, 3u);
+    app_device_generation_begin(3u);
+    feed_wifi(&ev, a, "AP-A", -54, 1u, 300u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan.generation = 3u;
+    app_device_generation_finish(&scan);
+
+    CHECK(app_device_count() == 1u,
+          "two consecutive misses must remove the device, got %u",
+          (unsigned)app_device_count());
     CHECK(app_device_find("wifi_100000000002") == NULL, "unseen device removed");
     /* ha_core must agree: no orphan Device or Entity left behind. */
     CHECK(ha_core_device_count() == 1u, "ha_core swept too, got %u",
@@ -416,7 +477,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, wifi_mac, "AP", -50, 1u, 100u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     CHECK(app_device_count() == 2u, "wifi and ble devices materialized");
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 1u;
@@ -424,11 +485,13 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     CHECK(app_device_count() == 2u, "both kept after a successful generation");
 
     /* Generation 2: only BLE ran (for example the Wi-Fi handover failed). The
-     * Wi-Fi device must survive as stale, not be deleted. */
+     * Wi-Fi device must survive, and must be reported as UNAVAILABLE rather than
+     * STALE: its protocol never got a chance to look, which is weaker evidence
+     * than a completed look that missed it. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
@@ -439,8 +502,12 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     {
         const app_device_binding_t *wifi_dev = app_device_find("wifi_700000000001");
         CHECK(wifi_dev != NULL, "wifi device still present");
-        CHECK(wifi_dev != NULL && wifi_dev->availability == APP_AVAILABILITY_STALE,
-              "wifi device marked stale because Wi-Fi never ran");
+        CHECK(wifi_dev != NULL &&
+                  wifi_dev->availability == APP_AVAILABILITY_UNAVAILABLE,
+              "wifi device UNAVAILABLE because Wi-Fi never ran, got %s",
+              wifi_dev ? app_availability_name(wifi_dev->availability) : "absent");
+        CHECK(wifi_dev != NULL && wifi_dev->miss_rounds == 0u,
+              "an unrun protocol does not count towards eviction");
         CHECK(ha_core_device_get("wifi_700000000001") != NULL,
               "ha_core still holds the wifi device");
     }
@@ -457,19 +524,33 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
               ble_dev ? app_availability_name(ble_dev->availability) : "absent");
     }
 
-    /* Generation 3: BLE ran and no longer sees the sensor, so it is genuinely
-     * gone and must be swept even though Wi-Fi still has not run. */
+    /* Generation 3: BLE ran and no longer sees the sensor. Its own protocol
+     * completed, so this is the first fully covered miss: STALE, not yet removed. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
 
-    CHECK(app_device_find("ble_00700000000002") == NULL,
-          "device from a protocol that ran and missed it is swept");
+    CHECK(app_device_find("ble_00700000000002") != NULL,
+          "first fully covered miss keeps the device");
     CHECK(app_device_find("wifi_700000000001") != NULL,
           "device from the unrun protocol is still kept");
+
+    /* Generation 4: BLE completes and misses it again, so the absence now holds
+     * twice in a row and the device is removed. */
+    app_scan_evidence_reset(&ev, 4u);
+    app_device_generation_begin(4u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
+    scan.generation = 4u;
+    app_device_generation_finish(&scan);
+
+    CHECK(app_device_find("ble_00700000000002") == NULL,
+          "two consecutive fully covered misses remove the device");
+    CHECK(app_device_find("wifi_700000000001") != NULL,
+          "while the unrun protocol's device is still kept");
 }
 
 /* A canceled or failed stage is not evidence of absence either. */
@@ -485,7 +566,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -494,7 +575,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     /* Generation 2: the Wi-Fi stage was canceled. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(SCAN_NO_STAGE, SCAN_NO_STAGE);
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_CANCELED;
     scan.generation = 2u;
@@ -504,21 +585,25 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     /* Generation 3: the Wi-Fi stage failed. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_FAILED;
     scan.generation = 3u;
     app_device_generation_finish(&scan);
     CHECK(app_device_count() == 1u, "failed stage must not sweep");
 
-    /* A NULL report is the conservative case: nothing is swept. */
+    /* A NULL report is the conservative case: nothing is swept, and because no
+     * coverage is known the device is UNAVAILABLE rather than STALE. */
     app_scan_evidence_reset(&ev, 4u);
     app_device_generation_begin(4u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     app_device_generation_finish(NULL);
     CHECK(app_device_count() == 1u, "null report must not sweep");
     CHECK(app_device_find("wifi_710000000001")->availability ==
-              APP_AVAILABILITY_STALE,
-          "kept device is marked stale");
+              APP_AVAILABILITY_UNAVAILABLE,
+          "kept device is UNAVAILABLE when nothing is known about coverage, got %s",
+          app_availability_name(app_device_find("wifi_710000000001")->availability));
+    CHECK(app_device_find("wifi_710000000001")->miss_rounds == 0u,
+          "and it does not count towards eviction");
 }
 
 static void test_stale_devices_do_not_accumulate_over_many_generations(void)
@@ -529,21 +614,41 @@ static void test_stale_devices_do_not_accumulate_over_many_generations(void)
 
     app_device_table_reset();
 
-    /* Ten generations, each seeing one different AP and each running the Wi-Fi
-     * stage. Without sweeping this would grow without bound; with sweeping it
-     * stays at one. */
+    /*
+     * Ten generations, each seeing exactly one different AP with the Wi-Fi stage
+     * complete. Two devices are therefore live at any time - this generation's and
+     * the previous one, which is STALE and awaiting its second miss - and the
+     * count is bounded rather than growing with the number of generations seen.
+     */
     for (uint32_t gen = 1u; gen <= 10u; ++gen) {
         uint8_t bssid[6] = {0x20, 0, 0, 0, 0, (uint8_t)gen};
+        size_t expected = gen == 1u ? 1u : 2u;
 
         app_scan_evidence_reset(&ev, gen);
         app_device_generation_begin(gen);
         feed_wifi(&ev, bssid, "AP", -50, (uint8_t)gen, (uint64_t)gen * 100u);
-        (void)app_device_materialize(&ev, &truncated);
+        (void)app_device_materialize(&ev, NULL, &truncated);
         scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
         scan.generation = gen;
         app_device_generation_finish(&scan);
-        CHECK(app_device_count() == 1u, "generation %u kept one device, got %u",
-              (unsigned)gen, (unsigned)app_device_count());
+
+        CHECK(app_device_count() == expected,
+              "generation %u kept %u device(s), got %u", (unsigned)gen,
+              (unsigned)expected, (unsigned)app_device_count());
+        /* The previous generation's device is still visible and marked, which is
+         * what makes the eviction grace period observable rather than silent. */
+        if (gen > 1u) {
+            char previous[32];
+
+            (void)snprintf(previous, sizeof(previous), "wifi_2000000000%02x",
+                           (unsigned)(gen - 1u));
+            {
+                const app_device_binding_t *old = app_device_find(previous);
+
+                CHECK(old != NULL && old->availability == APP_AVAILABILITY_STALE,
+                      "generation %u: the previous device is STALE", (unsigned)gen);
+            }
+        }
     }
 }
 
@@ -558,7 +663,7 @@ static void test_lan_device_uses_hostname_and_ip(void)
     app_device_generation_begin(1u);
 
     feed_lan(&ev, "192.168.1.50", "printer.local", 300u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() == 1u, "one LAN device");
     binding = app_device_find("lan_192_168_1_50");
@@ -586,7 +691,7 @@ static void test_capacity_overflow_is_reported(void)
         uint8_t bssid[6] = {0x30, 0, 0, 0, (uint8_t)(i >> 8), (uint8_t)i};
         feed_wifi(&ev, bssid, "AP", -50, 1u, (uint64_t)(i + 1u) * 10u);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() <= APP_DEVICE_MAX, "binding table stayed bounded");
     CHECK(truncated, "capacity overflow reported to the caller");
@@ -608,7 +713,7 @@ static void test_entity_capacity_is_bounded(void)
         uint8_t bssid[6] = {0x40, 0, 0, 0, (uint8_t)(i >> 8), (uint8_t)i};
         feed_wifi(&ev, bssid, "AP", -50, 1u, (uint64_t)(i + 1u) * 10u);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_count() <= APP_ENTITY_MAX, "app entity table stayed bounded");
     CHECK(truncated, "entity/device capacity overflow reported");
@@ -658,7 +763,7 @@ static void test_hostile_ssid_is_not_injected(void)
         obs.ssid[4] = 'J';
         (void)app_scan_ingest_wifi(&ev, &obs);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     binding = app_device_at(0u);
     CHECK(binding != NULL, "device created");
@@ -686,7 +791,7 @@ static void test_control_is_not_wired(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, bssid, "AP", -50, 1u, 10u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     for (size_t i = 0u; i < app_entity_count(); ++i) {
         const app_entity_binding_t *e = app_entity_at(i);
@@ -722,7 +827,7 @@ static void test_partial_coverage_does_not_sweep(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -732,7 +837,7 @@ static void test_partial_coverage_does_not_sweep(void)
      * did not report the device. A partial scan may simply have missed it. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
     scan.generation = 2u;
@@ -743,21 +848,38 @@ static void test_partial_coverage_does_not_sweep(void)
           (unsigned)app_device_count());
     {
         const app_device_binding_t *b = app_device_find("wifi_800000000001");
-        CHECK(b != NULL && b->availability == APP_AVAILABILITY_STALE,
-              "kept device is STALE, got %s",
+        CHECK(b != NULL && b->availability == APP_AVAILABILITY_UNAVAILABLE,
+              "kept device is UNAVAILABLE (coverage was incomplete), got %s",
               b ? app_availability_name(b->availability) : "absent");
+        CHECK(b != NULL && b->miss_rounds == 0u,
+              "an incomplete pass must not count towards eviction");
     }
 
-    /* Generation 3: this time Wi-Fi completed and still did not see it, so now
-     * the absence is real evidence. */
+    /* Generation 3: this time Wi-Fi completed and still did not see it, so the
+     * absence is real evidence - but only the first such round is grace. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 1u,
+          "the first fully covered miss keeps the device, got %u",
+          (unsigned)app_device_count());
+    CHECK(app_device_find("wifi_800000000001") != NULL &&
+              app_device_find("wifi_800000000001")->availability ==
+                  APP_AVAILABILITY_STALE,
+          "and marks it STALE");
+
+    /* Generation 4: a second fully covered miss removes it. */
+    app_scan_evidence_reset(&ev, 4u);
+    app_device_generation_begin(4u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 4u;
+    app_device_generation_finish(&scan);
     CHECK(app_device_count() == 0u,
-          "DONE coverage with the device missing does sweep, got %u",
+          "DONE coverage with the device missing twice does sweep, got %u",
           (unsigned)app_device_count());
 }
 
@@ -779,7 +901,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -788,7 +910,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     /* A pass where Wi-Fi ran incompletely and missed it: keep it. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
     scan.generation = 2u;
@@ -799,7 +921,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
     feed_wifi(&ev, mac, "AP", -52, 1u, 300u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
@@ -831,7 +953,7 @@ static void test_multi_source_one_missing_one_present(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, wifi_mac, "AP", -50, 1u, 100u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -843,39 +965,123 @@ static void test_multi_source_one_missing_one_present(void)
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
 
-    CHECK(app_device_find("wifi_820000000001") == NULL,
-          "the fully covered but absent Wi-Fi device is swept");
+    {
+        const app_device_binding_t *ap = app_device_find("wifi_820000000001");
+
+        CHECK(ap != NULL && ap->availability == APP_AVAILABILITY_STALE,
+              "the fully covered but absent Wi-Fi device is STALE, got %s",
+              ap ? app_availability_name(ap->availability) : "absent");
+    }
     ble_dev = app_device_find("ble_00820000000002");
     CHECK(ble_dev != NULL, "the still-reported BLE device survives");
     CHECK(ble_dev != NULL && ble_dev->availability == APP_AVAILABILITY_ONLINE,
           "the still-reported BLE device is ONLINE, got %s",
           ble_dev ? app_availability_name(ble_dev->availability) : "absent");
+    CHECK(ble_dev != NULL && ble_dev->miss_rounds == 0u,
+          "a device seen by any source has no pending misses");
 
     /* Generation 3: the reverse. BLE completes and misses the sensor; Wi-Fi is
-     * only PARTIAL. The BLE device is swept because its own protocol completed,
-     * while a Wi-Fi device (if any) would have been protected by the partial
-     * coverage. */
+     * only PARTIAL. The BLE device's own protocol completed, so this is the first
+     * fully covered miss and it becomes STALE while its identity is kept. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_BLE_RF] = APP_STAGE_STATE_DONE;
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
     scan.generation = 3u;
     app_device_generation_finish(&scan);
 
+    CHECK(app_device_find("ble_00820000000002") != NULL,
+          "a device whose own protocol completed and missed it is kept for one round");
+    CHECK(app_device_find("ble_00820000000002")->availability ==
+              APP_AVAILABILITY_STALE,
+          "and marked STALE");
+
+    /* Generation 4: BLE completes and misses it again, so it is removed. */
+    app_scan_evidence_reset(&ev, 4u);
+    app_device_generation_begin(4u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_none();
+    scan.states[APP_STAGE_BLE_RF] = APP_STAGE_STATE_DONE;
+    scan.generation = 4u;
+    app_device_generation_finish(&scan);
+
     CHECK(app_device_find("ble_00820000000002") == NULL,
-          "a device whose own protocol completed and missed it is swept");
+          "a second consecutive fully covered miss is what removes it");
 }
 
 /*
- * A device that was never successfully observed is UNAVAILABLE rather than
- * STALE, so the two unavailable states stay distinguishable.
+ * A device that reappears during its grace round must be fully restored, not left
+ * half-stale: one missed report is exactly the case the grace round exists for.
+ */
+static void test_reappearing_device_clears_its_miss_state(void)
+{
+    app_scan_evidence_t ev;
+    const uint8_t mac[6] = {0x84, 0, 0, 0, 0, 0x01};
+    bool truncated = false;
+    app_scan_status_t scan;
+    const app_device_binding_t *b;
+
+    app_device_table_reset();
+
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 1u;
+    app_device_generation_finish(&scan);
+
+    /* One fully covered miss. */
+    app_scan_evidence_reset(&ev, 2u);
+    app_device_generation_begin(2u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 2u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_find("wifi_840000000001")->miss_rounds == 1u, "one miss counted");
+    CHECK(!ha_core_entity_get("sensor.wifi_840000000001_signal_strength")->available,
+          "and the entities report unavailable while it is stale");
+
+    /* It comes back: the countdown must reset and the entities must be available
+     * again, or a single miss would permanently degrade the device. */
+    app_scan_evidence_reset(&ev, 3u);
+    app_device_generation_begin(3u);
+    feed_wifi(&ev, mac, "AP", -52, 1u, 300u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 3u;
+    app_device_generation_finish(&scan);
+
+    b = app_device_find("wifi_840000000001");
+    CHECK(b != NULL && b->availability == APP_AVAILABILITY_ONLINE, "back online");
+    CHECK(b != NULL && b->miss_rounds == 0u, "the miss countdown was reset");
+    CHECK(ha_core_entity_get("sensor.wifi_840000000001_signal_strength")->available,
+          "and its entities are available again");
+
+    /* So a later single miss starts the countdown from scratch. */
+    app_scan_evidence_reset(&ev, 4u);
+    app_device_generation_begin(4u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 4u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_find("wifi_840000000001") != NULL,
+          "one miss after reappearing does not remove it");
+    CHECK(app_device_find("wifi_840000000001")->miss_rounds == 1u,
+          "the countdown restarted rather than continuing");
+}
+
+/*
+ * A device whose coverage was never established is UNAVAILABLE rather than STALE,
+ * so the two unavailable states stay distinguishable: STALE means a completed look
+ * missed it, UNAVAILABLE means nobody managed to look.
  */
 static void test_never_observed_device_is_unavailable_not_stale(void)
 {
@@ -893,7 +1099,7 @@ static void test_never_observed_device_is_unavailable_not_stale(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     /* Begin a new generation without materialising anything, then finish with
      * every stage skipped. Coverage is incomplete, so nothing is swept. */
@@ -905,9 +1111,11 @@ static void test_never_observed_device_is_unavailable_not_stale(void)
 
     b = app_device_find("wifi_830000000001");
     CHECK(b != NULL, "device kept");
-    CHECK(b != NULL && b->availability == APP_AVAILABILITY_STALE,
-          "a device with a previous generation is STALE, got %s",
+    CHECK(b != NULL && b->availability == APP_AVAILABILITY_UNAVAILABLE,
+          "a device whose protocol never ran is UNAVAILABLE, got %s",
           b ? app_availability_name(b->availability) : "absent");
+    CHECK(b != NULL && b->miss_rounds == 0u,
+          "and it is not on an eviction countdown");
 }
 
 int main(void)
@@ -925,6 +1133,7 @@ int main(void)
     test_partial_coverage_does_not_sweep();
     test_single_rf_miss_with_full_coverage_sweeps_only_once();
     test_multi_source_one_missing_one_present();
+    test_reappearing_device_clears_its_miss_state();
     test_never_observed_device_is_unavailable_not_stale();
     test_stale_devices_do_not_accumulate_over_many_generations();
     test_lan_device_uses_hostname_and_ip();

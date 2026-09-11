@@ -252,3 +252,58 @@ fixture **仅用于测试**：`tests/fixtures` 不被固件构建引用，flash 
   CI 通过只证明编译与 host 规则测试。
 - Matter 独立构建仍未修复（在 `research/matter-chip-tool-l2-api`）。
 
+## B5 进展（2026-09-11 续作）
+
+分支 `feat/b5-recognition`（PR #20），B5 代码与测试本轮完成。
+剩余未完成项与逐项证据见 [交接记录](handover-ledger.md)。
+
+### 本轮修掉的一个致命缺陷
+
+`app_device_db.c` 的 `db_read()` 曾以 `db->open` 为门，而 `open` 只在
+`app_device_db_open()` 全部校验完成后才置位——**读头部本身就是校验的一部分**。
+结果是每个库在第一次读时返回 `ESP_ERR_INVALID_STATE`，落到 `io_error`，
+`device_db_open()` 永远不可能返回 READY。也就是说 B5 第一层提交的读取器
+**在真实硬件上不可能工作**，而当时没有任何 host 测试覆盖这条路径。
+
+现在读以 `opened`（存储已绑定、长度已知）为门，`open` 保持"已校验"的严格含义。
+新测试组 `app_device_db` 端到端覆盖该路径。
+
+### 已交付
+
+| 交付 | 说明 |
+|---|---|
+| `firmware/main/app_device_db_sd.{c,h}` | SD 适配器：`/sdcard/nearby/db/devices.nbdb`、复用 `board_sd_mount()`、全程持有一个文件句柄、短读报错、区分无卡与无库 |
+| `app_device_db.c` 变更检测 | 每次匹配前重读头部比对；`app_device_db_verify_unchanged()` 做全量重校验（流式 body CRC + 重新询问长度） |
+| 配方校验 | 域由编译期域表按 domain id 解析（不再使用文件里的域字符串构造 entity id）；缺读取来源的读配方被拒；decoder/quirk 不可用时返回"匹配但无配方"而不是无法填充的实体 |
+| `app_recognition_enrich()` | 一次匹配全部累积证据，结果按观测身份入表；物化阶段消费该表，数据库只在 enrichment 阶段被访问 |
+| `app_runtime.c` | 启动打开库、每次 enrichment 前重开、`resources` 输出 `db_state`/`db`/`db_path` |
+| `docs/recognition-budget.md` | 读取器约 9 KiB 且与语料规模无关；静态工作集约 93 KiB（由真实结构体 `sizeof` 计算）；真实容量由 `HA_CORE_MAX_DEVICES=8` 限制 |
+| `tests/host/test_app_device_db.c` | 161 checks：命中/未知/歧义/不合并/无卡/无文件/坏库/版本不符/超大/短读/IO 错误/索引过大/校验中取消/等长改写/原地改写/替换/增长/关闭/切换库/容量溢出 |
+
+### 四个边界问题
+
+任务书第三节逐项处理，证据与残留风险见交接记录第 5 节。要点：
+
+- 会话销毁超时后**隔离**无线资源并在任务真正退出后回收，期间拒绝启动新的射频阶段；
+  BLE tracker 不再被无条件释放（此前会是 use-after-free）。
+- 设备新鲜度改为**连续两轮**完整覆盖未见才淘汰；`STALE` 与 `UNAVAILABLE` 语义分开；
+  可用性同步到 ha_core Entity。
+- Wi-Fi 事件代次审计确认在事件产生时绑定；修掉隔离状态下 `released_for_scan` 未清的问题。
+- 库文件变化：头部比对 + 显式全量重校验两级，代价与覆盖范围分别记录。
+
+### 验证
+
+- 本机 13/15 组 host 测试通过（`tools/local/run-host-tests.ps1`，与 CI 同一清单与命令）。
+  `esphome_l2`、`nmap_l2` 需要 POSIX socket 头，本机工具链没有，只在 CI 验证。
+  应用组 checks：`app_device` 181、`app_device_db` 161、`app_scan` 136、`app_ops` 109、
+  `app_diag_protocol` 109、`device_db_format` 200、`device_db_python` 36，全部 0 failures。
+- **实板验证仍全部待办**：未插卡、未烧录。SD 挂载、共享 SPI2 与 LCD 的并发、
+  真实读取耗时、拔卡行为、任何 RAM/栈数值都没有测量过。
+
+### 过期文档更正
+
+`development-status.md` 早前记录"远端仅剩 main 与 matter 研究分支"，与当前
+`git branch -a` 不符（仍存在 `feat/b5-recognition` 及多个 `research/*`）。已在
+[交接记录](handover-ledger.md) 第 1 节更正，本轮不重启分支清理。
+
+

@@ -46,6 +46,14 @@ typedef struct {
     bool driver_up;          /* esp_wifi_init() succeeded */
     bool want_connection;    /* credentials exist and STA should hold an IP */
     bool released_for_scan;
+    /*
+     * The radio is held by a scan session whose teardown timed out.
+     *
+     * Distinct from `released_for_scan`: that is an orderly handover this module
+     * performs, while this is an unconfirmed one it must not undo. Kept in the
+     * context so it survives a status read and cannot be lost between calls.
+     */
+    bool quarantined;
     char ssid[WIFI_MGR_SSID_STORE];
     char ipv4[WIFI_MGR_IPV4_MAX];
     int8_t rssi;
@@ -90,6 +98,7 @@ const char *wifi_mgr_state_name(wifi_mgr_state_t state)
     case WIFI_MGR_CONNECTING:    return "connecting";
     case WIFI_MGR_CONNECTED:     return "connected";
     case WIFI_MGR_ERROR:         return "error";
+    case WIFI_MGR_QUARANTINED:   return "quarantined";
     default:                     return "invalid";
     }
 }
@@ -571,6 +580,13 @@ esp_err_t wifi_mgr_start(void)
         unlock();
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_ctx.quarantined) {
+        /* The radio is not ours to take. Reported as its own state, not as a
+         * connection failure: nothing was attempted. */
+        s_ctx.state = WIFI_MGR_QUARANTINED;
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (s_ctx.released_for_scan) {
         /* The radio belongs to a scan; do not fight it for the driver. */
         unlock();
@@ -722,6 +738,55 @@ esp_err_t wifi_mgr_release_for_scan(bool *out_was_started, bool *out_was_connect
     return ESP_OK;
 }
 
+esp_err_t wifi_mgr_quarantine(void)
+{
+    lock_init();
+    lock();
+    /*
+     * The radio is gone as far as this module is concerned, and it must not be
+     * touched again until the owning task has exited:
+     *
+     *   - `quarantined` is what every entry point checks before esp_wifi_init();
+     *   - `released_for_scan` is cleared because the orderly handover is over. A
+     *     stale DISCONNECTED arriving from the old driver must not still be
+     *     classified as "our teardown", now that there is no teardown in progress;
+     *   - `driver_up` is false because the driver really is deinitialised or about
+     *     to be, so a later start must go through esp_wifi_init() rather than
+     *     assuming it is still up.
+     *
+     * The IP is cleared for the same reason: an address the old driver held is not
+     * an address this station has.
+     */
+    s_ctx.quarantined = true;
+    s_ctx.released_for_scan = false;
+    s_ctx.driver_up = false;
+    s_ctx.want_connection = false;
+    s_ctx.state = WIFI_MGR_QUARANTINED;
+    clear_ip();
+    unlock();
+
+    ESP_LOGW(TAG, "wifi radio quarantined: a scan session did not release the driver");
+    return ESP_OK;
+}
+
+esp_err_t wifi_mgr_release_quarantine(void)
+{
+    lock_init();
+    lock();
+    if (!s_ctx.quarantined) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_ctx.quarantined = false;
+    s_ctx.released_for_scan = false;
+    s_ctx.state = s_ctx.credentials_present ? WIFI_MGR_DISCONNECTED
+                                            : WIFI_MGR_UNCONFIGURED;
+    unlock();
+
+    ESP_LOGI(TAG, "wifi quarantine released; reconnecting");
+    return wifi_mgr_start();
+}
+
 esp_err_t wifi_mgr_restore_after_scan(void)
 {
     esp_err_t err;
@@ -730,6 +795,19 @@ esp_err_t wifi_mgr_restore_after_scan(void)
     lock();
     if (!s_started_api) {
         unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_ctx.quarantined) {
+        /*
+         * A previous scan session still owns the driver. Re-initialising it here
+         * would race the old task's esp_wifi_deinit(), so the honest answer is to
+         * refuse and say why. The state stays QUARANTINED so the console and the
+         * future GUI can report it, rather than showing a disconnected station
+         * that looks like a credential problem.
+         */
+        s_ctx.state = WIFI_MGR_QUARANTINED;
+        unlock();
+        ESP_LOGW(TAG, "STA restore refused: the radio is quarantined");
         return ESP_ERR_INVALID_STATE;
     }
     s_ctx.released_for_scan = false;
@@ -777,6 +855,7 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out)
     out->rssi = s_ctx.rssi;
     out->last_error = s_ctx.last_error;
     out->released_for_scan = s_ctx.released_for_scan;
+    out->quarantined = s_ctx.quarantined;
     unlock();
 }
 

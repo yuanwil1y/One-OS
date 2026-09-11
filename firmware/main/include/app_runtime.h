@@ -25,6 +25,7 @@
 
 #include "app_diag_protocol.h"
 #include "app_ops.h"
+#include "app_recognizer.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,6 +50,11 @@ typedef struct {
     uint32_t stage_completed;
     uint32_t stage_total;
     const char *op_state;
+    /* Recognition source state and the path it was looked for at, so a missing
+     * card, a missing corpus and a corrupt corpus are distinguishable from the
+     * console without guessing. */
+    const char *db_state;
+    const char *db_path;
 } app_runtime_resources_t;
 
 esp_err_t app_runtime_get_resources(app_runtime_resources_t *out);
@@ -103,6 +109,24 @@ esp_err_t app_runtime_request_control(uint32_t request_id,
 
 /* Current operation state, readable from any task. */
 app_op_state_t app_runtime_op_state(void);
+
+/*
+ * Recognition database state, readable from any task.
+ *
+ * Separate from the scan report on purpose: the database has a state whether or
+ * not a scan has ever run, and Settings has to show it. `READY` means the corpus
+ * on the card was validated and can be matched against; every other value is a
+ * distinct, reportable reason why recognition is unavailable.
+ */
+app_db_state_t app_runtime_db_state(void);
+
+/* One-line description of the corpus for Settings/diagnostics, e.g.
+ * "ready v20260911 profiles=5". Never contains credentials. */
+esp_err_t app_runtime_db_describe(char *out, size_t out_size);
+
+/* Absolute path the corpus is read from, so the operator can compare it against
+ * what they wrote to the card. */
+const char *app_runtime_db_path(void);
 
 /*
  * Register the console task so the resource report can include its stack

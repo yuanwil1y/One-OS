@@ -231,3 +231,38 @@ fixture **仅用于测试**，不被固件构建引用；生产语料只放 SD�
 下一步为 B5（SD 按需读取、匹配、decoder/quirk 选择、Entity 配方，并实现 `enrichment` 阶段），
 随后 B6。
 
+## 执行记录：B5（2026-09-11 续作）
+
+分支 `feat/b5-recognition`（PR #20）。逐项状态、测试命令与未完成清单见
+[交接记录](handover-ledger.md)，内存预算见 [识别内存预算](recognition-budget.md)。
+
+**本轮修掉一个致命缺陷**：`app_device_db.c` 的 `db_read()` 以 `db->open` 为门，而
+`open` 只在全部校验完成后置位，因此第一次读头部就失败，读取器在真实硬件上
+**永远不可能打开任何库**。当时没有任何测试覆盖该路径。现已改为以 `opened` 为门，
+并新增 `app_device_db` 测试组（161 checks）端到端覆盖。
+
+已交付：SD 存储适配器（复用 `board_sd_mount`，全程持有一个文件句柄）、
+库变更检测与显式全量重校验、配方与 decoder/quirk 校验、真实 `enrichment` 阶段
+（一次匹配全部证据后物化）、`resources` 中的库状态与路径、内存预算文档。
+
+同时处理任务书第三节的四个边界问题：会话销毁超时后的无线资源隔离与回收、
+两轮设备新鲜度（STALE 与 UNAVAILABLE 语义分开）、Wi-Fi 事件代次审计与修正、
+库文件变化的两级检测。
+
+**验收条件核对（B5）**：
+
+| 验收项 | 状态 |
+|---|---|
+| 无卡、错版本、坏文件、读错误、拔卡、重开、歧义匹配 | host 覆盖（stub 存储注入） |
+| 不能靠整库载入 RAM 才通过 | 读取器约 9 KiB 且与语料规模无关，见预算文档 |
+| 挂载路径映射到 `/nearby/db/devices.nbdb` | 已实现为 `/sdcard/nearby/db/devices.nbdb` |
+| 复用 board 共享 SPI，不重复创建总线 | 走 `board_sd_mount()` |
+| 识别失败仍保留 generic Device | host 覆盖 |
+| **实板验证** | **未做**（未插卡、未烧录） |
+
+**未完成**：真实 SD/SPI 并发与耗时、拔卡行为、任何 RAM/栈测量、生产语料规模。
+`thread`/`zigbee` 阶段仍为空实现（归 B8/B9）。
+
+下一步为 B6（配网与数据库导入后端）。
+
+

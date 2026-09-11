@@ -33,6 +33,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "app_recognizer.h"
 #include "app_scan.h"
 #include "ha_core.h"
 
@@ -60,9 +61,33 @@ typedef enum {
 typedef enum {
     APP_AVAILABILITY_UNKNOWN = 0,
     APP_AVAILABILITY_ONLINE,
+    /*
+     * Not observed in a generation whose coverage was COMPLETE for every protocol
+     * that has seen this device. Absence is therefore real evidence, but not yet
+     * proof: one missed RF report is not a departure, so the device is kept and
+     * marked, and removal needs a second consecutive miss.
+     *
+     * The entity set is retained: a stale device's identity, recognition and
+     * entities are its identity, and dropping them would lose exactly the
+     * information a returning device needs.
+     */
     APP_AVAILABILITY_STALE,
+    /*
+     * Not observed, and absence is NOT evidence: at least one protocol that has
+     * seen this device was skipped, failed, cancelled or only partially covered
+     * this generation. "We could not look" is a weaker statement than "we looked
+     * and it was gone", and the two are reported differently on purpose.
+     *
+     * A persistent (authorized) identity is always at least this state and is
+     * never swept, so a commissioning it once held is not lost to an outage.
+     */
     APP_AVAILABILITY_UNAVAILABLE,
 } app_availability_t;
+
+/* How many consecutive fully-covered generations a missing ephemeral device is
+ * kept before it is removed. Two means one unexpected RF report cannot delete a
+ * device that is physically present. */
+#define APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT 2u
 
 typedef struct {
     char device_id[HA_CORE_ID_LEN];
@@ -70,6 +95,21 @@ typedef struct {
     uint32_t sources;
     app_recognition_state_t recognition;
     app_availability_t availability;
+    /*
+     * Per-source freshness for the current generation.
+     *
+     * A device can be observed by Wi-Fi and BLE; if BLE reports it and Wi-Fi does
+     * not, the device is still online and only the BLE side is fresh. Collapsing
+     * this into one flag would let one source's silence hide another source's
+     * evidence, so the table keeps a flag per source and the generation logic
+     * reads them individually.
+     */
+    bool seen_wifi;
+    bool seen_ble;
+    bool seen_lan;
+    /* Consecutive fully-covered generations in which this device was not seen by
+     * any source. Reset to zero by any sighting. */
+    uint8_t miss_rounds;
     bool ephemeral;              /* observation-derived, may be swept */
     bool read_only;              /* no writable Entity may be attached */
     uint32_t first_generation;
@@ -132,14 +172,144 @@ bool app_scan_stage_was_observed(const app_scan_status_t *scan,
 
 /* Materialise every observation in `ev` into HA Device/Entity/State.
  *
+ * This is the single production path from evidence to Device/Entity. There is no
+ * separate "without recognition" variant on purpose: one function means a caller
+ * cannot accidentally take the unrecognised path and quietly lose recognition.
+ *
+ * `recognizer` may be NULL, and the database behind it may be unopenable; both
+ * mean "recognition unavailable", which still produces a generic read-only Device.
+ * An unmatched or ambiguous result likewise keeps the Device generic. A matched
+ * result may add profile-defined entities, but a writable binding is attached only
+ * when recognition reports the backend as actually drivable - so a database record
+ * claiming `writable` cannot conjure a control path on its own.
+ *
  * Returns the number of devices created or refreshed. Sets `*truncated` when a
- * bounded table was full, so the caller can report a partial scan instead of
+ * bounded table was full, so the caller reports a partial scan rather than
  * pretending the environment was fully covered.
  */
-size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated);
+size_t app_device_materialize(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              bool *truncated);
 
 /* Current generation. */
 uint32_t app_device_generation(void);
+
+/*
+ * Number of application bindings removed so far - swept as no longer observed,
+ * or evicted to make room. Reported by diagnostics: a device that disappears
+ * from the list must be accounted for, not silently dropped.
+ */
+uint32_t app_device_swept_count(void);
+
+/*
+ * Per-observation recognition results, filled by the enrichment stage.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The product workflow recognises the whole accumulated evidence set in one
+ * place and only then materialises Devices. Keeping that order matters:
+ *
+ *   - "one App Device DB is responsible for all fingerprint matching", so
+ *     matching happens once per observation per generation, in one stage that
+ *     the scan report accounts for, instead of being re-derived per protocol
+ *     while the device table is being written;
+ *   - the device table still receives recognition only through
+ *     app_recognizer_ref_t, so it cannot reach the SD database itself;
+ *   - the result is inspectable, so a test can assert what recognition decided
+ *     without going through materialisation.
+ *
+ * Entries are keyed by the same identity the device table uses (protocol +
+ * observation bytes), so a lookup cannot cross protocols: the same bytes in
+ * Wi-Fi and BLE stay two devices with two independent results.
+ *
+ * MEMORY: an entry stores only what materialisation reads - the profile metadata
+ * and the compact recipes the matcher actually accepted. The full
+ * app_recognition_result_t, including its per-recipe sub-records, belongs to the
+ * matching call and is not retained; retaining it would make this table roughly
+ * ten times larger than the device table it feeds. See
+ * docs/recognition-budget.md for the measured numbers.
+ */
+#define APP_RECOGNITION_TABLE_MAX APP_DEVICE_MAX
+
+typedef enum {
+    APP_RECOGNITION_ENTRY_EMPTY = 0,
+    APP_RECOGNITION_ENTRY_PRESENT,
+} app_recognition_entry_state_t;
+
+typedef struct {
+    app_recognition_entry_state_t state;
+    uint32_t sources;
+    app_db_state_t db_state;         /* the database state when this was decided */
+    char identity[HA_CORE_ID_LEN];   /* the same key the device table builds */
+    /* false: recognition could not run at all, which is NOT "nothing matched". */
+    bool attempted;
+    bool matched;
+    bool ambiguous;
+    uint32_t profile_id;
+    char display_name[APP_RECOGNITION_MAX_LABEL];
+    char vendor[APP_RECOGNITION_MAX_LABEL];
+    char model[APP_RECOGNITION_MAX_LABEL];
+    uint32_t theengs_decoder_id;
+    uint32_t zha_quirk_id;
+    bool backend_supported;
+    const char *backend_name;
+    uint8_t recipe_count;
+    app_entity_recipe_t recipes[APP_RECOGNITION_MAX_RECIPES];
+} app_recognition_entry_t;
+
+typedef struct {
+    app_recognition_entry_t entries[APP_RECOGNITION_TABLE_MAX];
+    size_t count;
+    /*
+     * True when an observation could not be stored because the table was full.
+     * The caller reports a partial scan; it never means "nothing matched".
+     */
+    bool truncated;
+} app_recognition_table_t;
+
+void app_recognition_table_reset(app_recognition_table_t *table);
+
+/* Number of recorded outcomes. */
+size_t app_recognition_table_count(const app_recognition_table_t *table);
+
+/* True when an observation could not be recorded because the table was full. The
+ * caller reports a partial scan; it never means "nothing matched". */
+bool app_recognition_table_truncated(const app_recognition_table_t *table);
+
+/* Identity key for one observation, exactly as the device table builds it.
+ * `out` receives a NUL-terminated key and the return value is the key length,
+ * or 0 when the observation has no usable identity. */
+size_t app_device_identity_of_wifi(const app_scan_wifi_t *obs, char *out, size_t out_size);
+size_t app_device_identity_of_ble(const app_scan_ble_t *obs, char *out, size_t out_size);
+size_t app_device_identity_of_lan(const app_scan_lan_t *obs, char *out, size_t out_size);
+
+const app_recognition_entry_t *app_recognition_table_find(
+    const app_recognition_table_t *table, const char *identity);
+
+/*
+ * Recognise every observation in `ev` and record the outcome.
+ *
+ * This is the enrichment stage body. It performs the matching, resolves the
+ * decoder/quirk selection and prepares the entity recipes, but it writes no
+ * Device or Entity: materialisation applies them, so a failure here leaves the
+ * previous generation's Devices intact rather than half-updated.
+ *
+ * Returns the number of observations recorded. `recognizer` may be NULL or point
+ * at a closed database; every entry is then recorded as "not attempted" and the
+ * caller keeps generic Devices.
+ */
+size_t app_recognition_enrich(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              app_recognition_table_t *table);
+
+/*
+ * A recognizer view over an already-enriched table.
+ *
+ * Materialisation receives this instead of the database, so each Device adopts
+ * the result enrichment decided for its own observation. A device with no entry
+ * is reported as not attemptable, which keeps it generic.
+ */
+app_recognizer_ref_t app_recognition_table_recognizer(app_recognition_table_t *table);
 
 #ifdef __cplusplus
 }

@@ -42,6 +42,9 @@ struct kismet_ble_session {
     TaskHandle_t task;
     volatile bool cancel;
     volatile bool finished;
+    /* Set by destroy_checked() once it has taken the completion semaphore, i.e.
+     * once the task has provably stopped touching this session. */
+    volatile bool claimed;
     volatile bool sync_ok;
     uint8_t own_addr_type;
     kismet_ble_session_result_t result;
@@ -265,6 +268,9 @@ out:
     portENTER_CRITICAL(&s_active_lock);
     if (s_active == s) s_active = NULL;
     portEXIT_CRITICAL(&s_active_lock);
+    /* Last action before self-deletion, and deliberately after every other write
+     * to this session: destroy_checked() treats a successful take of this
+     * semaphore as proof that the task can no longer touch the session. */
     xSemaphoreGive(s->done);
     vTaskDelete(NULL);
 }
@@ -368,17 +374,42 @@ esp_err_t kismet_ble_session_destroy_checked(kismet_ble_session_t *s)
          * forever would remove the operation's timeout guarantee.
          *
          * If the task does not finish in time we must NOT free: it still holds
-         * pointers into this session, its queue and its semaphores, so the session
-         * is intentionally leaked and the caller is told so it can fail the
-         * operation instead of publishing evidence from a session it could not
-         * shut down.
+         * pointers into this session, its queue and its semaphores, and it will
+         * dereference them when it finally completes. The session is intentionally
+         * leaked and the caller is told so it can fail the operation instead of
+         * publishing evidence from a session it could not shut down.
+         *
+         * The leak is RECOVERABLE: the task sets `finished` as its last action
+         * before deleting itself, so the handle the caller still holds becomes
+         * destroyable as soon as that flag is set. See
+         * kismet_ble_session_task_alive().
          */
         if (xSemaphoreTake(s->done, pdMS_TO_TICKS(KISMET_BLE_DESTROY_TIMEOUT_MS)) != pdTRUE) {
-            /* Every allocation is left in place on purpose. */
+            /* Every allocation is left in place on purpose, and the handle stays
+             * valid for a later retry. */
             return ESP_ERR_TIMEOUT;
         }
+        /*
+         * Taking the completion semaphore is the claim, and it is what makes the
+         * free below safe. The task gives it as the VERY LAST thing it does before
+         * vTaskDelete(NULL), after it has finished touching every field, so a
+         * successful take proves there is no later access. `finished` alone would
+         * not: a task that has set it is still running.
+         */
+        s->claimed = true;
         xSemaphoreGive(s->done);
     }
     free_session(s);
     return ESP_OK;
+}
+
+bool kismet_ble_session_task_alive(const kismet_ble_session_t *s)
+{
+    if (!s) return false;
+    /*
+     * Alive until BOTH `finished` (the NimBLE host lifecycle has been handed back)
+     * and `claimed` (destroy_checked has observed the task's final semaphore give)
+     * hold. See kismet_wifi_session_task_alive() for why both are required.
+     */
+    return !(s->finished && s->claimed);
 }

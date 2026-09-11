@@ -9,6 +9,8 @@
  */
 
 #include "app_device.h"
+#include "app_device_db.h"
+#include "app_recognizer.h"
 #include "app_str.h"
 
 #include <stdio.h>
@@ -30,6 +32,18 @@ typedef struct {
     bool seen_wifi;
     bool seen_ble;
     bool seen_lan;
+
+    /*
+     * Recognition bookkeeping.
+     *
+     * `profile_id` is remembered so a later scan can tell whether the matched
+     * profile changed, and `recognition_applied` so the first successful match can
+     * be distinguished from a repeat. Without them a Device would either have its
+     * entities rebuilt on every scan (churning the entity table) or never adopt a
+     * later, better match at all.
+     */
+    uint32_t profile_id;
+    bool recognition_applied;
 } device_slot_t;
 
 typedef struct {
@@ -44,7 +58,9 @@ static uint32_t s_swept;
 
 /* Defined below; needed by the eviction path to avoid orphaned Entities. */
 static void entity_slot_free_for_device(const char *device_id);
-
+/* Defined below; needed by the generation sweep to keep Entity availability in
+ * step with the binding's. */
+static void sync_device_availability(device_slot_t *slot);
 const char *app_recognition_name(app_recognition_state_t state)
 {
     switch (state) {
@@ -181,6 +197,61 @@ static void entity_slot_free_for_device(const char *device_id)
     }
 }
 
+/*
+ * Push a device's availability into ha_core, where the Entity and its State live.
+ *
+ * Without this the three views disagree: the binding table says STALE, the Entity
+ * still says available, and a GUI reading either would show a different truth
+ * depending on which one it happened to read. The rule is stated once here:
+ *
+ *   - ONLINE      -> entity available
+ *   - STALE       -> entity UNAVAILABLE. The entity keeps its identity, its name,
+ *                    its unit and its last state; only its availability changes.
+ *                    Deleting it would lose exactly what a returning device needs
+ *                    and would renumber the entity table on every RF hiccup.
+ *   - UNAVAILABLE -> entity UNAVAILABLE, for the same reason.
+ *   - UNKNOWN     -> left alone; nothing has been observed yet.
+ *
+ * `available == false` is also what a future control path must check before
+ * dispatching, so this is the single place that makes "the device is not there"
+ * visible to every consumer.
+ */
+static void entity_set_available(const char *entity_id, bool available)
+{
+    const ha_entity_t *current = ha_core_entity_get(entity_id);
+
+    if (current == NULL) {
+        return;
+    }
+    if (current->available == available) {
+        return;
+    }
+    {
+        ha_entity_t updated = *current;
+
+        updated.available = available;
+        (void)ha_core_entity_upsert(&updated);
+    }
+}
+
+static void sync_device_availability(device_slot_t *slot)
+{
+    const bool available = slot->value.availability == APP_AVAILABILITY_ONLINE;
+
+    if (slot->value.availability == APP_AVAILABILITY_UNKNOWN) {
+        return;
+    }
+    for (size_t i = 0u; i < APP_ENTITY_MAX; ++i) {
+        if (!s_entities[i].in_use) {
+            continue;
+        }
+        if (strcmp(s_entities[i].value.device_id, slot->value.device_id) != 0) {
+            continue;
+        }
+        entity_set_available(s_entities[i].value.entity_id, available);
+    }
+}
+
 /* ---------------- enumeration ---------------- */
 
 size_t app_device_count(void)
@@ -264,6 +335,11 @@ size_t app_entity_count_for_device(const char *device_id)
 uint32_t app_device_generation(void)
 {
     return s_generation;
+}
+
+uint32_t app_device_swept_count(void)
+{
+    return s_swept;
 }
 
 /* ---------------- generation lifecycle ---------------- */
@@ -367,26 +443,58 @@ void app_device_generation_finish(const app_scan_status_t *scan)
         if (seen_by_any) {
             slot->value.availability = APP_AVAILABILITY_ONLINE;
             slot->value.last_generation = s_generation;
+            slot->value.miss_rounds = 0u;
             continue;
         }
 
         /*
-         * Not observed by any source this generation. Absence is only evidence
-         * when every source that has observed this device was fully covered;
-         * otherwise keep the device and mark it unavailable, so a partial scan
-         * cannot make devices disappear.
+         * Not observed by any source this generation.
+         *
+         * `fully_covered` is the whole question: it is true only when EVERY
+         * protocol that has ever observed this device covered its protocol
+         * completely this generation. A skipped, failed, cancelled or merely
+         * partial stage may simply have missed the device, so its silence proves
+         * nothing and must not be read as a departure.
          */
-        if (slot->value.ephemeral && device_all_sources_fully_covered(slot, scan)) {
+        if (!device_all_sources_fully_covered(slot, scan)) {
+            /* "We could not look" - weaker than "we looked and it was gone". The
+             * device keeps its identity, its recognition and its entities, and is
+             * reported as unavailable. A persistent authorized identity lives here
+             * permanently when it is out of range, which is what stops an outage
+             * from erasing a commissioning it once held. */
+            slot->value.availability = APP_AVAILABILITY_UNAVAILABLE;
+            slot->value.miss_rounds = 0u;
+            sync_device_availability(slot);
+            continue;
+        }
+
+        /*
+         * Absence is real evidence now. It is still not proof: a single RF report
+         * can be lost for reasons that have nothing to do with the device leaving,
+         * so an ephemeral device is kept for APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT
+         * consecutive fully covered misses before it is removed.
+         *
+         * The wait is deliberately spent on a visible state rather than on
+         * silence: the device is shown as stale, so an operator sees "we are no
+         * longer hearing it" one round before it disappears, instead of seeing it
+         * vanish with no warning.
+         */
+        if (slot->value.miss_rounds < 0xFFu) {
+            slot->value.miss_rounds++;
+        }
+        slot->value.availability = APP_AVAILABILITY_STALE;
+
+        if (slot->value.ephemeral &&
+            slot->value.miss_rounds >= APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT) {
             entity_slot_free_for_device(slot->value.device_id);
             (void)ha_core_device_remove(slot->value.ha_device_id);
             memset(slot, 0, sizeof(*slot));
             s_swept++;
         } else {
-            /* Persistent identity, or incomplete coverage. Which unavailable
-             * state is used depends on whether we ever did observe it. */
-            slot->value.availability = (slot->value.last_generation != 0u)
-                                           ? APP_AVAILABILITY_STALE
-                                           : APP_AVAILABILITY_UNAVAILABLE;
+            /* Kept. The entity set is retained too: it is the device's identity,
+             * and a returning device must not have to be rediscovered from
+             * scratch. */
+            sync_device_availability(slot);
         }
     }
 }
@@ -414,6 +522,440 @@ static void format_ip_key(char *out, size_t out_size, const char *ipv4)
         out[j++] = (c == '.') ? '_' : c;
     }
     out[j] = '\0';
+}
+
+/*
+ * Identity keys, exposed so enrichment and materialisation agree by construction.
+ *
+ * The key is namespaced per protocol and includes everything that makes two
+ * observations different devices: a BLE address type is part of the identity, and
+ * the same bytes seen in Wi-Fi, BLE and LAN are three keys, never one. Both the
+ * device table and the recognition table are keyed by exactly these functions, so
+ * a recognition result can only ever be applied to the observation it came from.
+ */
+size_t app_device_identity_of_wifi(const app_scan_wifi_t *obs, char *out,
+                                   size_t out_size)
+{
+    char mac[16];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_mac(mac, sizeof(mac), obs->bssid);
+    format_device_id(out, out_size, "wifi_", mac);
+    return strlen(out);
+}
+
+size_t app_device_identity_of_ble(const app_scan_ble_t *obs, char *out,
+                                  size_t out_size)
+{
+    char mac[16];
+    char type_key[24];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_mac(mac, sizeof(mac), obs->address);
+    (void)snprintf(type_key, sizeof(type_key), "%02x%s", obs->address_type, mac);
+    format_device_id(out, out_size, "ble_", type_key);
+    return strlen(out);
+}
+
+size_t app_device_identity_of_lan(const app_scan_lan_t *obs, char *out,
+                                  size_t out_size)
+{
+    char key[24];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_ip_key(key, sizeof(key), obs->ipv4);
+    format_device_id(out, out_size, "lan_", key);
+    return strlen(out);
+}
+
+/* ---------------- recognition table ---------------- */
+
+/* Identity of whichever observation `sources` names. Exactly one source bit is
+ * expected; a multi-source observation takes the first present source, matching
+ * the recognizer's own precedence. Returns false when nothing identifies it. */
+static bool identity_of_observation(uint32_t sources,
+                                    const app_scan_wifi_t *wifi,
+                                    const app_scan_ble_t *ble,
+                                    const app_scan_lan_t *lan,
+                                    char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0u) {
+        return false;
+    }
+    out[0] = '\0';
+
+    if ((sources & APP_SOURCE_BLE) != 0u && ble != NULL) {
+        return app_device_identity_of_ble(ble, out, out_size) > 0u;
+    }
+    if ((sources & APP_SOURCE_WIFI) != 0u && wifi != NULL) {
+        return app_device_identity_of_wifi(wifi, out, out_size) > 0u;
+    }
+    if ((sources & APP_SOURCE_LAN) != 0u && lan != NULL) {
+        return app_device_identity_of_lan(lan, out, out_size) > 0u;
+    }
+    if (ble != NULL) {
+        return app_device_identity_of_ble(ble, out, out_size) > 0u;
+    }
+    if (wifi != NULL) {
+        return app_device_identity_of_wifi(wifi, out, out_size) > 0u;
+    }
+    if (lan != NULL) {
+        return app_device_identity_of_lan(lan, out, out_size) > 0u;
+    }
+    return false;
+}
+
+void app_recognition_table_reset(app_recognition_table_t *table)
+{
+    if (table == NULL) {
+        return;
+    }
+    memset(table, 0, sizeof(*table));
+}
+
+size_t app_recognition_table_count(const app_recognition_table_t *table)
+{
+    return table == NULL ? 0u : table->count;
+}
+
+bool app_recognition_table_truncated(const app_recognition_table_t *table)
+{
+    return table != NULL && table->truncated;
+}
+
+const app_recognition_entry_t *app_recognition_table_find(
+    const app_recognition_table_t *table, const char *identity)
+{
+    if (table == NULL || identity == NULL || identity[0] == '\0') {
+        return NULL;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT &&
+            strcmp(table->entries[i].identity, identity) == 0) {
+            return &table->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static app_recognition_entry_t *recognition_entry_get(
+    app_recognition_table_t *table, const char *identity, uint32_t sources)
+{
+    app_recognition_entry_t *entry;
+
+    if (table == NULL || identity == NULL || identity[0] == '\0') {
+        return NULL;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT &&
+            strcmp(table->entries[i].identity, identity) == 0) {
+            return &table->entries[i];
+        }
+    }
+    if (table->count >= APP_RECOGNITION_TABLE_MAX) {
+        /*
+         * The table is full, so this observation gets no entry at all - and the
+         * caller must report a partial scan, because a device with no entry stays
+         * generic even when the corpus would have recognised it.
+         *
+         * The existing entries are deliberately NOT blanked. Blanking them would
+         * turn a capacity problem into "recognition unavailable" for devices that
+         * were in fact recognised, which is a false statement about the database;
+         * leaving them is a false statement about coverage, which the truncation
+         * flag discloses. Understating requires no correction, misreporting does.
+         */
+        table->truncated = true;
+        return NULL;
+    }
+    entry = &table->entries[table->count++];
+    memset(entry, 0, sizeof(*entry));
+    entry->state = APP_RECOGNITION_ENTRY_PRESENT;
+    entry->sources = sources;
+    (void)app_strlcpy(entry->identity, identity, sizeof(entry->identity));
+    return entry;
+}
+
+/*
+ * True when an entry was just refused for capacity.
+ *
+ * Tracked as a public flag on the table plus this helper so the enrich loop can
+ * stop asking, while the flag itself stays the single statement of "the result is
+ * incomplete" that the caller reports.
+ */
+static bool recognition_table_saturated(const app_recognition_table_t *table)
+{
+    return table != NULL && table->truncated;
+}
+
+/*
+ * Record one observation's recognition outcome.
+ *
+ * The result is normalised here into the three states the device layer acts on,
+ * so the device layer never has to re-derive them:
+ *
+ *   - the recognizer could not run (no recognizer, no usable database) ->
+ *     `attempted == false`. The device is reported as "recognition unavailable",
+ *     which is a different statement from "nothing matched";
+ *   - ambiguous -> recorded as ambiguous and left without recipes, so nothing
+ *     writable can be built from it;
+ *   - matched -> the recipes the reader accepted, already filtered for backend
+ *     drivability at the database boundary.
+ */
+static bool recognition_record(app_recognition_table_t *table,
+                               const app_recognizer_ref_t *recognizer,
+                               uint32_t sources, const char *identity,
+                               const app_scan_wifi_t *wifi,
+                               const app_scan_ble_t *ble,
+                               const app_scan_lan_t *lan)
+{
+    app_recognition_entry_t *entry = recognition_entry_get(table, identity, sources);
+    app_recognition_result_t result;
+
+    if (entry == NULL) {
+        return false;
+    }
+    if (recognizer == NULL || recognizer->ops == NULL ||
+        recognizer->ops->recognize == NULL) {
+        entry->attempted = false;
+        entry->db_state = APP_DB_STATE_CLOSED;
+        return true;
+    }
+
+    memset(&result, 0, sizeof(result));
+    entry->db_state = recognizer->ops->state != NULL
+                          ? recognizer->ops->state(recognizer->ctx)
+                          : APP_DB_STATE_CLOSED;
+    if (!recognizer->ops->recognize(recognizer->ctx, sources, wifi, ble, lan,
+                                    &result)) {
+        entry->attempted = false;
+        return true;
+    }
+
+    entry->attempted = true;
+    if (result.ambiguous) {
+        /*
+         * Ambiguity is carried through but never as a match: no recipe, no
+         * display metadata, nothing writable. The ids are still recorded for
+         * diagnostics - they say which families the corpus named - but nothing
+         * acts on them.
+         */
+        entry->ambiguous = true;
+        entry->theengs_decoder_id = DEVICE_DB_NO_INDEX;
+        entry->zha_quirk_id = DEVICE_DB_NO_INDEX;
+        entry->backend_name = "none";
+        return true;
+    }
+
+    entry->matched = result.matched;
+    entry->profile_id = result.profile_id;
+    entry->theengs_decoder_id = result.theengs_decoder_id;
+    entry->zha_quirk_id = result.zha_quirk_id;
+    entry->backend_supported = result.backend_supported;
+    entry->backend_name = result.backend_name;
+    entry->recipe_count = result.recipe_count;
+    (void)app_strlcpy(entry->display_name, result.display_name,
+                      sizeof(entry->display_name));
+    (void)app_strlcpy(entry->vendor, result.vendor, sizeof(entry->vendor));
+    (void)app_strlcpy(entry->model, result.model, sizeof(entry->model));
+    if (result.recipe_count > APP_RECOGNITION_MAX_RECIPES) {
+        entry->recipe_count = APP_RECOGNITION_MAX_RECIPES;
+    }
+    for (uint8_t i = 0u; i < entry->recipe_count; ++i) {
+        entry->recipes[i] = result.recipes[i];
+    }
+    return true;
+}
+
+size_t app_recognition_enrich(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              app_recognition_table_t *table)
+{
+    size_t recorded = 0u;
+
+    if (table == NULL) {
+        return 0u;
+    }
+    app_recognition_table_reset(table);
+    if (ev == NULL) {
+        return 0u;
+    }
+
+    /*
+     * Every observation is attempted, and `recorded` counts attempts rather than
+     * stored entries: an observation past the table's capacity was still tried,
+     * and the difference between "we tried and could not store it" and "we never
+     * looked" is what app_recognition_table_truncated() reports. A caller that
+     * conflated the two would either hide a capacity problem or claim recognition
+     * failed when the database was never consulted.
+     *
+     * The loops stop early once the table is saturated, because nothing further
+     * can be stored and continuing would only burn read I/O on the card.
+     */
+    for (size_t i = 0u; i < ev->wifi_count; ++i) {
+        char identity[HA_CORE_ID_LEN];
+
+        if (app_device_identity_of_wifi(&ev->wifi[i], identity,
+                                        sizeof(identity)) == 0u) {
+            continue;
+        }
+        recorded++;
+        if (!recognition_record(table, recognizer, APP_SOURCE_WIFI, identity,
+                                &ev->wifi[i], NULL, NULL)) {
+            break;
+        }
+    }
+    if (!recognition_table_saturated(table)) {
+        for (size_t i = 0u; i < ev->ble_count; ++i) {
+            char identity[HA_CORE_ID_LEN];
+
+            if (app_device_identity_of_ble(&ev->ble[i], identity,
+                                           sizeof(identity)) == 0u) {
+                continue;
+            }
+            recorded++;
+            if (!recognition_record(table, recognizer, APP_SOURCE_BLE, identity,
+                                    NULL, &ev->ble[i], NULL)) {
+                break;
+            }
+        }
+    }
+    if (!recognition_table_saturated(table)) {
+        for (size_t i = 0u; i < ev->lan_count; ++i) {
+            char identity[HA_CORE_ID_LEN];
+
+            if (app_device_identity_of_lan(&ev->lan[i], identity,
+                                           sizeof(identity)) == 0u) {
+                continue;
+            }
+            recorded++;
+            if (!recognition_record(table, recognizer, APP_SOURCE_LAN, identity,
+                                    NULL, NULL, &ev->lan[i])) {
+                break;
+            }
+        }
+    }
+    return recorded;
+}
+
+/*
+ * Recognizer view over an enriched table.
+ *
+ * The kernel the device table talks to. It never touches the database: it copies
+ * the stored result for the identity it is asked about, which is what makes
+ * "recognition happened in the enrichment stage" true by construction rather than
+ * by convention, and keeps the device table independent of SD.
+ */
+static bool table_recognizer_recognize(void *ctx, uint32_t sources,
+                                       const app_scan_wifi_t *wifi,
+                                       const app_scan_ble_t *ble,
+                                       const app_scan_lan_t *lan,
+                                       app_recognition_result_t *out)
+{
+    app_recognition_table_t *table = (app_recognition_table_t *)ctx;
+    const app_recognition_entry_t *entry = NULL;
+    char identity[HA_CORE_ID_LEN];
+
+    if (out == NULL) {
+        return false;
+    }
+
+    /* One source bit identifies the observation, so the same helper the device
+     * table uses builds the key here too. */
+    if (identity_of_observation(sources, wifi, ble, lan, identity,
+                                sizeof(identity))) {
+        entry = app_recognition_table_find(table, identity);
+    }
+
+    if (entry == NULL || !entry->attempted) {
+        /*
+         * No outcome was recorded for this observation, so recognition could not
+         * run. Reported as such rather than as "not matched": the device stays
+         * generic and the report says recognition was unavailable, which is a
+         * different statement from "we looked and found nothing".
+         */
+        memset(out, 0, sizeof(*out));
+        out->theengs_decoder_id = DEVICE_DB_NO_INDEX;
+        out->zha_quirk_id = DEVICE_DB_NO_INDEX;
+        out->backend_name = "none";
+        return false;
+    }
+
+    /* Rebuild the result the matcher produced from the stored entry. */
+    memset(out, 0, sizeof(*out));
+    out->matched = entry->matched;
+    out->ambiguous = entry->ambiguous;
+    out->profile_id = entry->profile_id;
+    out->theengs_decoder_id = entry->theengs_decoder_id;
+    out->zha_quirk_id = entry->zha_quirk_id;
+    out->backend_supported = entry->backend_supported;
+    out->backend_name = entry->backend_name != NULL ? entry->backend_name : "none";
+    out->recipe_count = entry->recipe_count;
+    (void)app_strlcpy(out->display_name, entry->display_name,
+                      sizeof(out->display_name));
+    (void)app_strlcpy(out->vendor, entry->vendor, sizeof(out->vendor));
+    (void)app_strlcpy(out->model, entry->model, sizeof(out->model));
+    for (uint8_t i = 0u; i < entry->recipe_count && i < APP_RECOGNITION_MAX_RECIPES;
+         ++i) {
+        out->recipes[i] = entry->recipes[i];
+    }
+    return true;
+}
+
+static app_db_state_t table_recognizer_state(void *ctx)
+{
+    const app_recognition_table_t *table = (const app_recognition_table_t *)ctx;
+
+    if (table == NULL) {
+        return APP_DB_STATE_CLOSED;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT) {
+            /* The state the database itself reported when this entry was decided.
+             * Returning READY/CLOSED from the `attempted` flag would lose the
+             * reason: "the card is missing" and "the corpus is corrupt" are
+             * different problems and Settings has to show which one it is. */
+            return table->entries[i].attempted ? APP_DB_STATE_READY
+                                               : table->entries[i].db_state;
+        }
+    }
+    return APP_DB_STATE_CLOSED;
+}
+
+static void table_recognizer_describe(void *ctx, char *out, size_t out_size)
+{
+    const app_recognition_table_t *table = (const app_recognition_table_t *)ctx;
+
+    if (out == NULL || out_size == 0u) {
+        return;
+    }
+    if (table == NULL) {
+        (void)snprintf(out, out_size, "closed");
+        return;
+    }
+    (void)snprintf(out, out_size, "enriched entries=%lu%s",
+                   (unsigned long)app_recognition_table_count(table),
+                   table->truncated ? " truncated" : "");
+}
+
+static const app_recognizer_ops_t s_table_ops = {
+    .recognize = table_recognizer_recognize,
+    .state = table_recognizer_state,
+    .describe = table_recognizer_describe,
+};
+
+app_recognizer_ref_t app_recognition_table_recognizer(app_recognition_table_t *table)
+{
+    app_recognizer_ref_t ref;
+
+    ref.ops = &s_table_ops;
+    ref.ctx = table;
+    return ref;
 }
 
 /* ---------------- device upsert ---------------- */
@@ -529,6 +1071,10 @@ static device_slot_t *device_upsert(const char *device_id,
         slot->seen_lan = true;
     }
     slot->value.availability = APP_AVAILABILITY_ONLINE;
+    /* Seen by any source cancels the eviction countdown. Without this a device
+     * that flickers in and out would accumulate misses across rounds and be
+     * removed while it is still present. */
+    slot->value.miss_rounds = 0u;
     if (seen_ms >= slot->value.last_seen_ms) {
         slot->value.last_seen_ms = seen_ms;
     }
@@ -634,10 +1180,262 @@ static void entity_upsert_last_seen(device_slot_t *device, bool *out_truncated)
                   "timestamp", "s", value, out_truncated);
 }
 
+/*
+ * Create one Entity from a recognition recipe.
+ *
+ * `writable` is decided by the caller after checking that the recipe names a
+ * backend this firmware can actually drive, so an entity is only ever writable
+ * when a real control path exists. A read-only recipe still produces the entity:
+ * the device publishes a value we can read.
+ */
+static void entity_upsert_recipe(device_slot_t *device,
+                                 const app_entity_recipe_t *recipe,
+                                 bool writable,
+                                 bool *out_truncated)
+{
+    char entity_id[HA_CORE_ENTITY_ID_LEN];
+    char unique_id[HA_CORE_UNIQUE_ID_LEN];
+    char object_id[HA_CORE_NAME_LEN];
+    entity_slot_t *slot;
+    ha_entity_t entity;
+    ha_core_status_t status;
+
+    /* Stable, slug-safe entity id: the recipe name if usable, else the domain and
+     * read source. Names come from the database, so they may contain anything. */
+    (void)snprintf(object_id, sizeof(object_id), "%s", recipe->name[0] != '\0'
+                                                         ? recipe->name
+                                                         : "value");
+    for (size_t i = 0u; object_id[i] != '\0'; ++i) {
+        char c = object_id[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (c >= 'A' && c <= 'Z') {
+            object_id[i] = (char)(c - 'A' + 'a');
+            continue;
+        }
+        if (!ok) {
+            object_id[i] = '_';
+        }
+    }
+    if (object_id[0] == '\0') {
+        (void)app_strlcpy(object_id, "value", sizeof(object_id));
+    }
+
+    /*
+     * Assembled explicitly rather than with one snprintf.
+     *
+     * The entity id is "<domain>.<device>_<object>"; every part is already bounded,
+     * so appending them in order and checking each step proves the result fits
+     * instead of hoping a single format call truncates safely. A truncated id
+     * would be a bug that silently aliases two entities.
+     */
+    {
+        size_t used;
+
+        (void)app_strlcpy(entity_id, recipe->domain, sizeof(entity_id));
+        used = strlen(entity_id);
+        if (used + 1u >= sizeof(entity_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        entity_id[used++] = '.';
+        (void)app_strlcpy(entity_id + used, device->value.device_id,
+                          sizeof(entity_id) - used);
+        used = strlen(entity_id);
+        if (used + 1u >= sizeof(entity_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        entity_id[used++] = '_';
+        (void)app_strlcpy(entity_id + used, object_id, sizeof(entity_id) - used);
+
+        (void)app_strlcpy(unique_id, device->value.device_id, sizeof(unique_id));
+        used = strlen(unique_id);
+        if (used + 1u >= sizeof(unique_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        unique_id[used++] = '_';
+        (void)app_strlcpy(unique_id + used, object_id, sizeof(unique_id) - used);
+    }
+
+    memset(&entity, 0, sizeof(entity));
+    (void)app_strlcpy(entity.entity_id, entity_id, sizeof(entity.entity_id));
+    (void)app_strlcpy(entity.unique_id, unique_id, sizeof(entity.unique_id));
+    (void)app_strlcpy(entity.platform, "nearby", sizeof(entity.platform));
+    (void)app_strlcpy(entity.domain, recipe->domain, sizeof(entity.domain));
+    (void)app_strlcpy(entity.device_id, device->value.ha_device_id,
+                      sizeof(entity.device_id));
+    (void)app_strlcpy(entity.name, recipe->name, sizeof(entity.name));
+    (void)app_strlcpy(entity.device_class, recipe->device_class,
+                      sizeof(entity.device_class));
+    (void)app_strlcpy(entity.unit_of_measurement, recipe->unit,
+                      sizeof(entity.unit_of_measurement));
+    entity.has_entity_name = true;
+    entity.enabled = true;
+    entity.available = true;
+
+    if (writable) {
+        /* A drivable write path exists. The service mask still has to be one HA
+         * actually defines, so the dispatcher cannot be handed an unknown name. */
+        entity.supported_services = HA_SERVICE_MASK_TURN_ON | HA_SERVICE_MASK_TURN_OFF;
+        entity.service_handler = NULL; /* bound by the control task in B10 */
+        entity.service_context = NULL;
+    } else {
+        entity.supported_services = 0u;
+        entity.service_handler = NULL;
+        entity.service_context = NULL;
+    }
+
+    status = ha_core_entity_upsert(&entity);
+    if (status != HA_CORE_OK) {
+        if (out_truncated != NULL) {
+            *out_truncated = true;
+        }
+        return;
+    }
+
+    slot = entity_slot_find(entity_id);
+    if (slot == NULL) {
+        slot = entity_slot_alloc();
+        if (slot == NULL) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        (void)app_strlcpy(slot->value.entity_id, entity_id, sizeof(slot->value.entity_id));
+        (void)app_strlcpy(slot->value.device_id, device->value.device_id,
+                          sizeof(slot->value.device_id));
+        (void)app_strlcpy(slot->value.domain, recipe->domain, sizeof(slot->value.domain));
+        (void)app_strlcpy(slot->value.name, recipe->name, sizeof(slot->value.name));
+        (void)app_strlcpy(slot->value.unit, recipe->unit, sizeof(slot->value.unit));
+    }
+    slot->value.writable = writable;
+}
+
+/* ---------------- recognition ---------------- */
+
+/*
+ * Recognise one observation and apply the result to its Device.
+ *
+ * The rules, in one place:
+ *
+ *   - a NULL recognizer, or a database that cannot be used, means recognition is
+ *     UNAVAILABLE: the Device stays generic and says why, rather than vanishing
+ *     or claiming to be unknown;
+ *   - unmatched or ambiguous keeps the Device generic and read-only. Ambiguity is
+ *     never permission to guess;
+ *   - only a deterministic match attaches profile entities, and a writable binding
+ *     is attached only when the recipe names a backend this firmware can drive. A
+ *     database record saying `writable` is a claim about the device, not about our
+ *     capabilities;
+ *   - generic entities (signal, last seen, channel, tx power) are applied either
+ *     way, so a recognised Device does not lose its observed facts.
+ *
+ * Entities are upserted by id, so re-materialising with the same profile refreshes
+ * values instead of churning the entity table.
+ */
+static void apply_recognition(device_slot_t *slot,
+                              const app_recognizer_ref_t *recognizer,
+                              uint32_t sources,
+                              const app_scan_wifi_t *wifi,
+                              const app_scan_ble_t *ble,
+                              const app_scan_lan_t *lan,
+                              bool *out_truncated)
+{
+    app_recognition_result_t result;
+
+    if (recognizer == NULL || recognizer->ops == NULL ||
+        recognizer->ops->recognize == NULL) {
+        slot->value.recognition = APP_RECOGNITION_DB_UNAVAILABLE;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    memset(&result, 0, sizeof(result));
+    if (!recognizer->ops->recognize(recognizer->ctx, sources, wifi, ble, lan,
+                                    &result)) {
+        /* The call could not run at all: no usable database. */
+        slot->value.recognition = APP_RECOGNITION_DB_UNAVAILABLE;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    if (result.ambiguous) {
+        slot->value.recognition = APP_RECOGNITION_AMBIGUOUS;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+    if (!result.matched) {
+        slot->value.recognition = APP_RECOGNITION_UNKNOWN;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    slot->value.recognition = APP_RECOGNITION_MATCHED;
+    slot->profile_id = result.profile_id;
+    slot->recognition_applied = true;
+
+    /*
+     * Adopt recognised display metadata only when the Device has no better name of
+     * its own: a name the device itself advertised beats a database label, and a
+     * later stronger match may still replace a generic fallback.
+     */
+    if (result.display_name[0] != '\0') {
+        const ha_device_t *current = ha_core_device_get(slot->value.ha_device_id);
+        const bool generic_name =
+            current == NULL || strcmp(current->name, "Unknown BLE Device") == 0 ||
+            strcmp(current->name, "Unknown Wi-Fi Device") == 0 ||
+            strcmp(current->name, "Hidden Wi-Fi AP") == 0;
+
+        if (generic_name) {
+            ha_device_t device;
+
+            memset(&device, 0, sizeof(device));
+            if (current != NULL) {
+                device = *current;
+            }
+            (void)app_strlcpy(device.id, slot->value.ha_device_id, sizeof(device.id));
+            (void)app_strlcpy(device.name, result.display_name, sizeof(device.name));
+            (void)app_strlcpy(device.manufacturer, result.vendor, sizeof(device.manufacturer));
+            (void)app_strlcpy(device.model, result.model, sizeof(device.model));
+            (void)app_strlcpy(device.model_id, slot->value.protocol_label,
+                              sizeof(device.model_id));
+            if (ha_core_device_upsert(&device) != HA_CORE_OK && out_truncated != NULL) {
+                *out_truncated = true;
+            }
+        }
+    }
+
+    slot->value.read_only = true;
+    for (uint8_t i = 0u; i < result.recipe_count; ++i) {
+        const app_entity_recipe_t *recipe = &result.recipes[i];
+        const bool writable = recipe->write_target_id != DEVICE_DB_NO_INDEX &&
+                              app_backend_is_drivable(recipe->backend);
+
+        entity_upsert_recipe(slot, recipe, writable, out_truncated);
+        if (writable) {
+            slot->value.read_only = false;
+        }
+    }
+}
+
 /* ---------------- materialisation ---------------- */
+
 
 static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
                                        size_t index,
+                                       const app_recognizer_ref_t *recognizer,
                                        bool *out_truncated)
 {
     const app_scan_wifi_t *obs = &ev->wifi[index];
@@ -650,9 +1448,11 @@ static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
     device_slot_t *slot;
     bool created = false;
 
+    /* The identity is built by the shared helper, so the device table and the
+     * recognition table cannot disagree about which observation this is. */
+    (void)app_device_identity_of_wifi(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
     format_mac(key, sizeof(key), obs->bssid);
-    format_device_id(device_id, sizeof(device_id), "wifi_", key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "wifi_", key);
 
     if (obs->has_ssid && obs->ssid_len > 0u) {
         /* The SSID is untrusted bytes from the air. Copy it as a bounded C
@@ -707,12 +1507,15 @@ static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
                       "", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_WIFI, obs, NULL, NULL,
+                      out_truncated);
     return slot;
 }
 
 static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
-                                      size_t index,
-                                      bool *out_truncated)
+                                       size_t index,
+                                       const app_recognizer_ref_t *recognizer,
+                                       bool *out_truncated)
 {
     const app_scan_ble_t *obs = &ev->ble[index];
     char key[16];
@@ -727,10 +1530,11 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
 
     format_mac(key, sizeof(key), obs->address);
     /* Address type is part of the identity: the same bytes with a different
-     * type are a different peer, so it is encoded into the key. */
+     * type are a different peer. The shared helper encodes that rule, so the
+     * recognition table keys BLE observations identically. */
+    (void)app_device_identity_of_ble(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
     (void)snprintf(type_key, sizeof(type_key), "%02x%s", obs->address_type, key);
-    format_device_id(device_id, sizeof(device_id), "ble_", type_key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "ble_", type_key);
 
     if (obs->has_parsed_adv && obs->adv.name_present && obs->adv.name[0] != '\0') {
         size_t len = strlen(obs->adv.name);
@@ -784,12 +1588,15 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
                       "dBm", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_BLE, NULL, obs, NULL,
+                      out_truncated);
     return slot;
 }
 
 static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
-                                      size_t index,
-                                      bool *out_truncated)
+                                       size_t index,
+                                       const app_recognizer_ref_t *recognizer,
+                                       bool *out_truncated)
 {
     const app_scan_lan_t *obs = &ev->lan[index];
     char key[24];
@@ -802,8 +1609,8 @@ static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
     const char *name;
 
     format_ip_key(key, sizeof(key), obs->ipv4);
-    format_device_id(device_id, sizeof(device_id), "lan_", key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "lan_", key);
+    (void)app_device_identity_of_lan(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
 
     name = obs->hostname[0] != '\0' ? obs->hostname : obs->ipv4;
 
@@ -831,10 +1638,14 @@ static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
                       "", "", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_LAN, NULL, NULL, obs,
+                      out_truncated);
     return slot;
 }
 
-size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated)
+size_t app_device_materialize(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              bool *truncated)
 {
     size_t materialized = 0u;
     bool local_truncated = false;
@@ -847,17 +1658,17 @@ size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated)
     }
 
     for (size_t i = 0u; i < ev->wifi_count; ++i) {
-        if (materialize_wifi(ev, i, &local_truncated) != NULL) {
+        if (materialize_wifi(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }
     for (size_t i = 0u; i < ev->ble_count; ++i) {
-        if (materialize_ble(ev, i, &local_truncated) != NULL) {
+        if (materialize_ble(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }
     for (size_t i = 0u; i < ev->lan_count; ++i) {
-        if (materialize_lan(ev, i, &local_truncated) != NULL) {
+        if (materialize_lan(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }

@@ -25,3 +25,4 @@ __pycache__/
 tools/msg-*.txt
 tools/pr-*.md
 tools/ci_getjobs.js
+tools/cijobs.js
