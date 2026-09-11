@@ -15,6 +15,7 @@
  */
 
 #include "app_runtime.h"
+#include "app_str.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -800,10 +801,10 @@ esp_err_t app_runtime_request_control(uint32_t request_id,
     memset(&request, 0, sizeof(request));
     request.command = APP_DIAG_CMD_CONTROL;
     request.request_id = request_id;
-    (void)strlcpy(request.target, entity_id, sizeof(request.target));
-    (void)strlcpy(request.action, action, sizeof(request.action));
+    (void)app_strlcpy(request.target, entity_id, sizeof(request.target));
+    (void)app_strlcpy(request.action, action, sizeof(request.action));
     if (value != NULL) {
-        (void)strlcpy(request.value, value, sizeof(request.value));
+        (void)app_strlcpy(request.value, value, sizeof(request.value));
     }
     return app_runtime_submit(&request, out_response, 0u);
 }

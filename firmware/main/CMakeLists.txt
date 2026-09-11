@@ -4,6 +4,7 @@ idf_component_register(
         "app_ops.c"
         "app_diag_protocol.c"
         "app_scan.c"
+        "app_str.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"

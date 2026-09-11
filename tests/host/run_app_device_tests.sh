@@ -18,6 +18,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   -I"$ROOT/firmware/main/include" \
   -I"$ROOT/firmware/components/ha_core/include" \
   "$ROOT/firmware/components/ha_core/ha_core.c" \
+  "$ROOT/firmware/main/app_str.c" \
   "$ROOT/firmware/main/app_ops.c" \
   "$ROOT/firmware/main/app_scan.c" \
   "$ROOT/firmware/main/app_device.c" \

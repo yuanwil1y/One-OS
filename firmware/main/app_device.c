@@ -9,6 +9,7 @@
  */
 
 #include "app_device.h"
+#include "app_str.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -125,7 +126,7 @@ static device_slot_t *device_slot_evict_ephemeral(char *out_prev_id,
     }
 
     if (out_prev_id != NULL && out_prev_id_size > 0u) {
-        (void)strlcpy(out_prev_id, victim->value.device_id, out_prev_id_size);
+        (void)app_strlcpy(out_prev_id, victim->value.device_id, out_prev_id_size);
     }
     memset(victim, 0, sizeof(*victim));
     victim->in_use = true;
@@ -350,7 +351,8 @@ static device_slot_t *device_upsert(const char *device_id,
     }
 
     if (slot == NULL) {
-        char evicted_id[HA_CORE_ID_LEN];
+        char evicted_app_id[HA_CORE_ID_LEN];
+        char evicted_ha_id[HA_CORE_ID_LEN];
 
         slot = device_slot_alloc();
         if (slot == NULL) {
@@ -358,24 +360,28 @@ static device_slot_t *device_upsert(const char *device_id,
              * ha_core Device and Entities with it: leaving them behind would
              * leave orphaned state that the UI could still address. */
             device_slot_t *victim =
-                device_slot_evict_ephemeral(evicted_id, sizeof(evicted_id));
+                device_slot_evict_ephemeral(evicted_app_id, sizeof(evicted_app_id));
             if (victim == NULL) {
                 if (out_truncated != NULL) {
                     *out_truncated = true;
                 }
                 return NULL;
             }
-            entity_slot_free_for_device(evicted_id);
-            (void)ha_core_device_remove(evicted_id);
+            /* The victim slot was cleared, so recover its ha_core id from the
+             * application id. They are currently identical by construction, but
+             * this stays correct if the two ever diverge. */
+            (void)app_strlcpy(evicted_ha_id, evicted_app_id, sizeof(evicted_ha_id));
+            entity_slot_free_for_device(evicted_app_id);
+            (void)ha_core_device_remove(evicted_ha_id);
             slot = victim;
             if (out_truncated != NULL) {
                 *out_truncated = true;
             }
         }
-        (void)strlcpy(slot->value.device_id, device_id, sizeof(slot->value.device_id));
-        (void)strlcpy(slot->value.ha_device_id, ha_device_id,
+        (void)app_strlcpy(slot->value.device_id, device_id, sizeof(slot->value.device_id));
+        (void)app_strlcpy(slot->value.ha_device_id, ha_device_id,
                       sizeof(slot->value.ha_device_id));
-        (void)strlcpy(slot->value.protocol_label, protocol_label,
+        (void)app_strlcpy(slot->value.protocol_label, protocol_label,
                       sizeof(slot->value.protocol_label));
         slot->value.ephemeral = ephemeral;
         /* Until the SD Device DB is wired there is no recognition source at all,
@@ -401,11 +407,11 @@ static device_slot_t *device_upsert(const char *device_id,
     }
 
     memset(&device, 0, sizeof(device));
-    (void)strlcpy(device.id, ha_device_id, sizeof(device.id));
-    (void)strlcpy(device.name, name, sizeof(device.name));
-    (void)strlcpy(device.manufacturer, manufacturer, sizeof(device.manufacturer));
-    (void)strlcpy(device.model, model, sizeof(device.model));
-    (void)strlcpy(device.model_id, protocol_label, sizeof(device.model_id));
+    (void)app_strlcpy(device.id, ha_device_id, sizeof(device.id));
+    (void)app_strlcpy(device.name, name, sizeof(device.name));
+    (void)app_strlcpy(device.manufacturer, manufacturer, sizeof(device.manufacturer));
+    (void)app_strlcpy(device.model, model, sizeof(device.model));
+    (void)app_strlcpy(device.model_id, protocol_label, sizeof(device.model_id));
 
     if (identifier != NULL) {
         device.identifiers[0] = *identifier;
@@ -448,14 +454,14 @@ static void entity_upsert(device_slot_t *device,
                    object_id);
 
     memset(&entity, 0, sizeof(entity));
-    (void)strlcpy(entity.entity_id, entity_id, sizeof(entity.entity_id));
-    (void)strlcpy(entity.unique_id, unique_id, sizeof(entity.unique_id));
-    (void)strlcpy(entity.platform, "nearby", sizeof(entity.platform));
-    (void)strlcpy(entity.domain, domain, sizeof(entity.domain));
-    (void)strlcpy(entity.device_id, device->value.ha_device_id, sizeof(entity.device_id));
-    (void)strlcpy(entity.name, name, sizeof(entity.name));
-    (void)strlcpy(entity.device_class, device_class, sizeof(entity.device_class));
-    (void)strlcpy(entity.unit_of_measurement, unit, sizeof(entity.unit_of_measurement));
+    (void)app_strlcpy(entity.entity_id, entity_id, sizeof(entity.entity_id));
+    (void)app_strlcpy(entity.unique_id, unique_id, sizeof(entity.unique_id));
+    (void)app_strlcpy(entity.platform, "nearby", sizeof(entity.platform));
+    (void)app_strlcpy(entity.domain, domain, sizeof(entity.domain));
+    (void)app_strlcpy(entity.device_id, device->value.ha_device_id, sizeof(entity.device_id));
+    (void)app_strlcpy(entity.name, name, sizeof(entity.name));
+    (void)app_strlcpy(entity.device_class, device_class, sizeof(entity.device_class));
+    (void)app_strlcpy(entity.unit_of_measurement, unit, sizeof(entity.unit_of_measurement));
     entity.has_entity_name = true;
     entity.enabled = true;
     entity.available = true;
@@ -480,12 +486,12 @@ static void entity_upsert(device_slot_t *device,
             }
             return;
         }
-        (void)strlcpy(slot->value.entity_id, entity_id, sizeof(slot->value.entity_id));
-        (void)strlcpy(slot->value.device_id, device->value.device_id,
+        (void)app_strlcpy(slot->value.entity_id, entity_id, sizeof(slot->value.entity_id));
+        (void)app_strlcpy(slot->value.device_id, device->value.device_id,
                       sizeof(slot->value.device_id));
-        (void)strlcpy(slot->value.domain, domain, sizeof(slot->value.domain));
-        (void)strlcpy(slot->value.name, name, sizeof(slot->value.name));
-        (void)strlcpy(slot->value.unit, unit, sizeof(slot->value.unit));
+        (void)app_strlcpy(slot->value.domain, domain, sizeof(slot->value.domain));
+        (void)app_strlcpy(slot->value.name, name, sizeof(slot->value.name));
+        (void)app_strlcpy(slot->value.unit, unit, sizeof(slot->value.unit));
         /* No writable entity exists yet: every binding is read-only until a
          * protocol profile with a verified control path is available. */
         slot->value.writable = false;
@@ -557,21 +563,21 @@ static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
             memcpy(name, obs->ssid, len);
             name[len] = '\0';
         } else {
-            (void)strlcpy(name, obs->ssid_hidden ? "Hidden Wi-Fi AP" : "Unknown Wi-Fi Device",
+            (void)app_strlcpy(name, obs->ssid_hidden ? "Hidden Wi-Fi AP" : "Unknown Wi-Fi Device",
                           sizeof(name));
         }
     } else {
-        (void)strlcpy(name, obs->ssid_hidden ? "Hidden Wi-Fi AP" : "Unknown Wi-Fi Device",
+        (void)app_strlcpy(name, obs->ssid_hidden ? "Hidden Wi-Fi AP" : "Unknown Wi-Fi Device",
                       sizeof(name));
     }
 
     memset(&identifier, 0, sizeof(identifier));
-    (void)strlcpy(identifier.domain, "wifi_bssid", sizeof(identifier.domain));
-    (void)strlcpy(identifier.value, key, sizeof(identifier.value));
+    (void)app_strlcpy(identifier.domain, "wifi_bssid", sizeof(identifier.domain));
+    (void)app_strlcpy(identifier.value, key, sizeof(identifier.value));
 
     memset(&connection, 0, sizeof(connection));
-    (void)strlcpy(connection.type, "mac", sizeof(connection.type));
-    (void)strlcpy(connection.value, key, sizeof(connection.value));
+    (void)app_strlcpy(connection.type, "mac", sizeof(connection.type));
+    (void)app_strlcpy(connection.value, key, sizeof(connection.value));
 
     slot = device_upsert(device_id, ha_device_id, name, "", "", "wifi",
                          APP_SOURCE_WIFI, true, &identifier, &connection,
@@ -623,7 +629,10 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
         bool printable = true;
 
         for (size_t i = 0u; i < len; ++i) {
-            if (obs->adv.name[i] < 0x20u || obs->adv.name[i] > 0x7Eu) {
+            /* Cast to unsigned char: a plain char is signed on some targets and
+             * would promote to a negative int for bytes >= 0x80. */
+            unsigned char c = (unsigned char)obs->adv.name[i];
+            if (c < 0x20u || c > 0x7Eu) {
                 printable = false;
                 break;
             }
@@ -631,19 +640,19 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
         if (printable && len < sizeof(name)) {
             memcpy(name, obs->adv.name, len + 1u);
         } else {
-            (void)strlcpy(name, "Unknown BLE Device", sizeof(name));
+            (void)app_strlcpy(name, "Unknown BLE Device", sizeof(name));
         }
     } else {
-        (void)strlcpy(name, "Unknown BLE Device", sizeof(name));
+        (void)app_strlcpy(name, "Unknown BLE Device", sizeof(name));
     }
 
     memset(&identifier, 0, sizeof(identifier));
-    (void)strlcpy(identifier.domain, "ble_addr", sizeof(identifier.domain));
-    (void)strlcpy(identifier.value, type_key, sizeof(identifier.value));
+    (void)app_strlcpy(identifier.domain, "ble_addr", sizeof(identifier.domain));
+    (void)app_strlcpy(identifier.value, type_key, sizeof(identifier.value));
 
     memset(&connection, 0, sizeof(connection));
-    (void)strlcpy(connection.type, "bluetooth", sizeof(connection.type));
-    (void)strlcpy(connection.value, type_key, sizeof(connection.value));
+    (void)app_strlcpy(connection.type, "bluetooth", sizeof(connection.type));
+    (void)app_strlcpy(connection.value, type_key, sizeof(connection.value));
 
     slot = device_upsert(device_id, ha_device_id, name, "", "", "ble",
                          APP_SOURCE_BLE, true, &identifier, &connection,
@@ -691,12 +700,12 @@ static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
     name = obs->hostname[0] != '\0' ? obs->hostname : obs->ipv4;
 
     memset(&identifier, 0, sizeof(identifier));
-    (void)strlcpy(identifier.domain, "lan_ip", sizeof(identifier.domain));
-    (void)strlcpy(identifier.value, key, sizeof(identifier.value));
+    (void)app_strlcpy(identifier.domain, "lan_ip", sizeof(identifier.domain));
+    (void)app_strlcpy(identifier.value, key, sizeof(identifier.value));
 
     memset(&connection, 0, sizeof(connection));
-    (void)strlcpy(connection.type, "ip", sizeof(connection.type));
-    (void)strlcpy(connection.value, obs->ipv4, sizeof(connection.value));
+    (void)app_strlcpy(connection.type, "ip", sizeof(connection.type));
+    (void)app_strlcpy(connection.value, obs->ipv4, sizeof(connection.value));
 
     slot = device_upsert(device_id, ha_device_id, name, "", "", "lan",
                          APP_SOURCE_LAN, true, &identifier, &connection,

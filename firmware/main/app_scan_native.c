@@ -8,6 +8,7 @@
  */
 
 #include "app_scan_native.h"
+#include "app_str.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -15,8 +16,6 @@
 #include "app_wifi.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/atomic.h"
 #include "ha_discovery.h"
 #include "kismet_ble.h"
 #include "kismet_wifi.h"
@@ -519,12 +518,12 @@ static void lan_note_mdns(app_scan_evidence_t *ev, const ha_mdns_service_t *serv
 
         memset(&obs, 0, sizeof(obs));
         obs.generation = ev->generation;
-        (void)strlcpy(obs.ipv4, addr, sizeof(obs.ipv4));
+        (void)app_strlcpy(obs.ipv4, addr, sizeof(obs.ipv4));
         obs.from_mdns = true;
         obs.up = true;
         obs.service_count = 1u;
-        (void)strlcpy(obs.hostname, service->hostname, sizeof(obs.hostname));
-        (void)strlcpy(obs.service, service->service_type, sizeof(obs.service));
+        (void)app_strlcpy(obs.hostname, service->hostname, sizeof(obs.hostname));
+        (void)app_strlcpy(obs.service, service->service_type, sizeof(obs.service));
         obs.first_seen_ms = now_ms();
         obs.last_seen_ms = obs.first_seen_ms;
         (void)app_scan_ingest_lan(ev, &obs);
@@ -642,7 +641,7 @@ static void nmap_host_cb(const nmap_host_result_t *result, void *ctx)
 
     memset(&obs, 0, sizeof(obs));
     obs.generation = ev->generation;
-    (void)strlcpy(obs.ipv4, ipv4, sizeof(obs.ipv4));
+    (void)app_strlcpy(obs.ipv4, ipv4, sizeof(obs.ipv4));
     obs.from_nmap = true;
     obs.up = true;
     obs.first_seen_ms = now_ms();

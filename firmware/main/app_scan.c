@@ -6,6 +6,7 @@
  */
 
 #include "app_scan.h"
+#include "app_str.h"
 
 #include <string.h>
 
@@ -353,10 +354,10 @@ bool app_scan_ingest_lan(app_scan_evidence_t *ev, const app_scan_lan_t *obs)
         existing->from_nmap = existing->from_nmap || obs->from_nmap;
         existing->up = existing->up || obs->up;
         if (obs->hostname[0] != '\0' && existing->hostname[0] == '\0') {
-            (void)strlcpy(existing->hostname, obs->hostname, sizeof(existing->hostname));
+            (void)app_strlcpy(existing->hostname, obs->hostname, sizeof(existing->hostname));
         }
         if (obs->service[0] != '\0' && existing->service[0] == '\0') {
-            (void)strlcpy(existing->service, obs->service, sizeof(existing->service));
+            (void)app_strlcpy(existing->service, obs->service, sizeof(existing->service));
         }
         if (obs->service_count > 0u) {
             existing->service_count += obs->service_count;

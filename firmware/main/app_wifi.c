@@ -7,6 +7,7 @@
  */
 
 #include "app_wifi.h"
+#include "app_str.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -181,7 +182,7 @@ esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *password)
     }
 
     if (err == ESP_OK) {
-        (void)strlcpy(s_ctx.ssid, ssid, sizeof(s_ctx.ssid));
+        (void)app_strlcpy(s_ctx.ssid, ssid, sizeof(s_ctx.ssid));
         s_ctx.credentials_present = true;
         s_ctx.want_connection = true;
     }
@@ -378,7 +379,7 @@ static esp_err_t apply_credentials_and_connect(void)
     esp_err_t err;
 
     memset(&config, 0, sizeof(config));
-    (void)strlcpy((char *)config.sta.ssid, s_ctx.ssid, sizeof(config.sta.ssid));
+    (void)app_strlcpy((char *)config.sta.ssid, s_ctx.ssid, sizeof(config.sta.ssid));
 
     err = read_stored_secret(password, sizeof(password));
     if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -388,7 +389,7 @@ static esp_err_t apply_credentials_and_connect(void)
     if (err != ESP_OK) {
         return err;
     }
-    (void)strlcpy((char *)config.sta.password, password, sizeof(config.sta.password));
+    (void)app_strlcpy((char *)config.sta.password, password, sizeof(config.sta.password));
     /* Wipe the local copy as soon as the driver has taken its own. */
     memset(password, 0, sizeof(password));
 
@@ -618,8 +619,8 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out)
     memset(out, 0, sizeof(*out));
     out->state = s_ctx.state;
     out->credentials_present = s_ctx.credentials_present;
-    (void)strlcpy(out->ssid, s_ctx.ssid, sizeof(out->ssid));
-    (void)strlcpy(out->ipv4, s_ctx.ipv4, sizeof(out->ipv4));
+    (void)app_strlcpy(out->ssid, s_ctx.ssid, sizeof(out->ssid));
+    (void)app_strlcpy(out->ipv4, s_ctx.ipv4, sizeof(out->ipv4));
     out->rssi = s_ctx.rssi;
     out->last_error = s_ctx.last_error;
     out->released_for_scan = s_ctx.released_for_scan;

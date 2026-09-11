@@ -16,6 +16,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   -Wall -Wextra -Werror -pedantic \
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   -I"$ROOT/firmware/main/include" \
+  "$ROOT/firmware/main/app_str.c" \
   "$ROOT/firmware/main/app_ops.c" \
   "$ROOT/firmware/main/app_scan.c" \
   "$ROOT/tests/host/test_app_scan.c" \

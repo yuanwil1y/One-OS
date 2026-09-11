@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "app_scan.h"
+#include "app_str.h"
 
 static int failures = 0;
 static int checks = 0;
@@ -287,7 +288,7 @@ static void test_ble_later_parsed_adv_wins(void)
     obs.has_parsed_adv = true;
     obs.adv.valid = true;
     obs.adv.name_present = true;
-    (void)strlcpy(obs.adv.name, "TH Sensor", sizeof(obs.adv.name));
+    (void)app_strlcpy(obs.adv.name, "TH Sensor", sizeof(obs.adv.name));
     CHECK(app_scan_ingest_ble(&ev, &obs), "parsed adv accepted");
 
     found = app_scan_find_ble(&ev, obs.address, obs.address_type);
@@ -339,19 +340,19 @@ static void test_lan_merges_sources_by_ip(void)
     app_scan_evidence_reset(&ev, 1u);
 
     memset(&obs, 0, sizeof(obs));
-    (void)strlcpy(obs.ipv4, "192.168.1.10", sizeof(obs.ipv4));
+    (void)app_strlcpy(obs.ipv4, "192.168.1.10", sizeof(obs.ipv4));
     obs.from_mdns = true;
     obs.up = true;
     obs.service_count = 1u;
-    (void)strlcpy(obs.hostname, "printer.local", sizeof(obs.hostname));
-    (void)strlcpy(obs.service, "_ipp._tcp.local", sizeof(obs.service));
+    (void)app_strlcpy(obs.hostname, "printer.local", sizeof(obs.hostname));
+    (void)app_strlcpy(obs.service, "_ipp._tcp.local", sizeof(obs.service));
     obs.first_seen_ms = 5u;
     obs.last_seen_ms = 5u;
     CHECK(app_scan_ingest_lan(&ev, &obs), "mdns evidence accepted");
 
     /* Nmap finds the same host: merged, sources combined. */
     memset(&obs, 0, sizeof(obs));
-    (void)strlcpy(obs.ipv4, "192.168.1.10", sizeof(obs.ipv4));
+    (void)app_strlcpy(obs.ipv4, "192.168.1.10", sizeof(obs.ipv4));
     obs.from_nmap = true;
     obs.up = true;
     obs.last_seen_ms = 40u;

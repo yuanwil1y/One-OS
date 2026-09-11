@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "app_device.h"
+#include "app_str.h"
 #include "app_scan.h"
 #include "ha_core.h"
 
@@ -76,7 +77,7 @@ static void feed_ble(app_scan_evidence_t *ev, const uint8_t addr[6],
         obs.has_parsed_adv = true;
         obs.adv.valid = true;
         obs.adv.name_present = true;
-        (void)strlcpy(obs.adv.name, name, sizeof(obs.adv.name));
+        (void)app_strlcpy(obs.adv.name, name, sizeof(obs.adv.name));
         if (with_tx_power) {
             obs.adv.tx_power_present = true;
             obs.adv.tx_power_dbm = tx_power;
@@ -91,8 +92,8 @@ static void feed_lan(app_scan_evidence_t *ev, const char *ip, const char *hostna
     app_scan_lan_t obs;
 
     memset(&obs, 0, sizeof(obs));
-    (void)strlcpy(obs.ipv4, ip, sizeof(obs.ipv4));
-    (void)strlcpy(obs.hostname, hostname, sizeof(obs.hostname));
+    (void)app_strlcpy(obs.ipv4, ip, sizeof(obs.ipv4));
+    (void)app_strlcpy(obs.hostname, hostname, sizeof(obs.hostname));
     obs.from_mdns = true;
     obs.up = true;
     obs.service_count = 1u;
@@ -410,21 +411,36 @@ static void test_entity_capacity_is_bounded(void)
 {
     app_scan_evidence_t ev;
     bool truncated = false;
+    size_t device_count;
 
     app_device_table_reset();
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
 
-    for (uint32_t i = 0u; i < APP_DEVICE_MAX; ++i) {
+    /* More devices than ha_core itself can hold. Their Entities must not grow
+     * without bound, and the overflow must be reported. */
+    for (uint32_t i = 0u; i < HA_CORE_MAX_DEVICES + 2u; ++i) {
         uint8_t bssid[6] = {0x40, 0, 0, 0, (uint8_t)(i >> 8), (uint8_t)i};
         feed_wifi(&ev, bssid, "AP", -50, 1u, (uint64_t)(i + 1u) * 10u);
     }
     (void)app_device_materialize(&ev, &truncated);
 
-    CHECK(app_entity_count() <= APP_ENTITY_MAX, "entity table stayed bounded");
-    CHECK(ha_core_entity_count_for_device(app_device_at(0u)->ha_device_id) <=
-              HA_CORE_MAX_ENTITIES,
-          "ha_core entity count within its own bound");
+    CHECK(app_entity_count() <= APP_ENTITY_MAX, "app entity table stayed bounded");
+    CHECK(truncated, "entity/device capacity overflow reported");
+
+    /* Every Entity that does exist must still belong to a real ha_core Device:
+     * no orphan may be left behind by a failed insert. */
+    device_count = app_device_count();
+    for (size_t i = 0u; i < device_count; ++i) {
+        const app_device_binding_t *b = app_device_at(i);
+        CHECK(b != NULL && ha_core_device_get(b->ha_device_id) != NULL,
+              "binding %u has a matching ha_core device", (unsigned)i);
+    }
+    for (size_t i = 0u; i < app_entity_count(); ++i) {
+        const app_entity_binding_t *e = app_entity_at(i);
+        CHECK(e != NULL && app_device_find(e->device_id) != NULL,
+              "entity %u belongs to a known device", (unsigned)i);
+    }
 }
 
 static void test_hostile_ssid_is_not_injected(void)
