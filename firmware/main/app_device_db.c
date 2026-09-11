@@ -22,6 +22,7 @@
  */
 
 #include "app_device_db.h"
+#include "app_device.h"
 
 #include <stdio.h>
 #include <string.h>

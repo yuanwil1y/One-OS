@@ -688,10 +688,49 @@ static void entity_upsert_recipe(device_slot_t *device,
         (void)app_strlcpy(object_id, "value", sizeof(object_id));
     }
 
-    (void)snprintf(entity_id, sizeof(entity_id), "%s.%s_%s", recipe->domain,
-                   device->value.device_id, object_id);
-    (void)snprintf(unique_id, sizeof(unique_id), "%s_%s", device->value.device_id,
-                   object_id);
+    /*
+     * Assembled explicitly rather than with one snprintf.
+     *
+     * The entity id is "<domain>.<device>_<object>"; every part is already bounded,
+     * so appending them in order and checking each step proves the result fits
+     * instead of hoping a single format call truncates safely. A truncated id
+     * would be a bug that silently aliases two entities.
+     */
+    {
+        size_t used;
+
+        (void)app_strlcpy(entity_id, recipe->domain, sizeof(entity_id));
+        used = strlen(entity_id);
+        if (used + 1u >= sizeof(entity_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        entity_id[used++] = '.';
+        (void)app_strlcpy(entity_id + used, device->value.device_id,
+                          sizeof(entity_id) - used);
+        used = strlen(entity_id);
+        if (used + 1u >= sizeof(entity_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        entity_id[used++] = '_';
+        (void)app_strlcpy(entity_id + used, object_id, sizeof(entity_id) - used);
+
+        (void)app_strlcpy(unique_id, device->value.device_id, sizeof(unique_id));
+        used = strlen(unique_id);
+        if (used + 1u >= sizeof(unique_id)) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        unique_id[used++] = '_';
+        (void)app_strlcpy(unique_id + used, object_id, sizeof(unique_id) - used);
+    }
 
     memset(&entity, 0, sizeof(entity));
     (void)app_strlcpy(entity.entity_id, entity_id, sizeof(entity.entity_id));
