@@ -154,32 +154,101 @@ B0 的"完成"只覆盖**构建与诊断骨架**，不代表任何真实后端�
 | `ble_rf` | **已接入真实后端** |
 | `mdns` / `ssdp` | **已接入真实后端**，仅在获得 IPv4 时执行 |
 | `lan_hosts` | **已接入真实后端**（Nmap 主机发现） |
-| `lan_services` | **仍为空实现**，返回 `not_implemented`，记为 `skipped` |
-| `thread` / `zigbee` | **仍为空实现**，记为 `skipped` 并带明确原因 |
-| `enrichment` | **仍为空实现**（无 SD Device DB，无 profile 可依据） |
+| `lan_services` | **已接入真实后端**（Nmap 有界服务探测，见下） |
+| `thread` / `zigbee` | **仍为空实现**，记为 `skipped` 并带明确原因；归 B8/B9 |
+| `enrichment` | **仍为空实现**（无 SD Device DB，无 profile 可依据）；归 B5 |
 | `materialize` | **已接入** `ha_core` |
 
 局部失败不会伪装成全协议完成：未接入的阶段一律 `skipped` + 原因，`partial=1`。
 
-### CI 证据（run `34612225371`，两者均 success）
+### lan_services 的范围边界（B2 收尾，2026-09-11）
 
-- host tests：**12 组全部通过，`failed groups: 0`**。
-  新增 `app_scan`（114 checks, 0 failures）与 `app_device`（118 checks, 0 failures）。
+这是唯一会向其他设备发起 TCP 连接的阶段，因此范围刻意收窄：
+
+- 目标只取 `lan_hosts` 已判定为 up 的主机，上限 16 台；地址用
+  `esp_netif_str_to_ip4()` 解析，因此不依赖是哪一路发现来源；
+- 固定 8 个知名服务端口（HTTP/HTTPS/SSH/Telnet/ESPHome 6053/MQTT/RTSP/9100），
+  上限 8 个；
+- 仅 `PASSIVE` 探测档，捕获字节上限 256：不写入、不尝试任何凭据、不发送协议专用载荷；
+- 端口扫描与服务扫描共用同一个 deadline，两半之间检查取消；
+- 没有开放端口不算失败，无目标可探测返回成功而非错误。
+
+**未验证**：该阶段只能在 ESP-IDF 下编译，host 无法执行；其"LAN 阶段需要 IP、跳过不等于完成"
+的策略由 `app_scan` 组覆盖，但端口探测、服务识别与取消边界**尚未对真实局域网验证**。
+
+### CI 证据（run `34622080671`，两者均 success）
+
+- host tests：**14 组全部通过，`failed groups: 0`**。
+  新增 `app_scan`（114）、`app_device`（133）、`device_db_python`（36）、
+  `device_db_format`（200 checks）。
 - build：ESP-IDF v6.1 / esp32c6 构建成功。
-  `one_os.bin` = 0x1834F0（约 1.52 MB），app 分区 0x300000，剩余 0x17CB10（50%）。
-  **该数字来自 CI 构建日志，不是实板资源测量。**
+  `one_os.bin` = 0x184090（约 1.52 MB），app 分区 0x300000，剩余 0x17BF70（49%）。
+  **该数字来自 CI 构建日志，不是实板资源测量。RAM/栈余量完全未测量。**
 
 host 测试断言的是规则而非 mock 行为：未接入协议被判为 skipped 而不是 done；
 LAN 阶段需要 IP；同一串字节在 Wi-Fi 与 BLE 中保持为两个不同设备；未知设备保留且只读；
 未观测到的值不生成 Entity；重复物化不增长；十个代次的不同 AP 不累积；
-容量溢出被报告；恶意 SSID 无法注入控制字符；ha_core 拒绝插入时不留下孤儿绑定。
+容量溢出被报告；恶意 SSID 无法注入控制字符；ha_core 拒绝插入时不留下孤儿绑定；
+未运行的协议不会导致其设备被判为消失。
+
+## B4 进展（2026-09-11）
+
+`.nbdb` 容器格式 + 主机生成器 + 独立验证器 + 固件读取器。规范见
+[Device DB 格式规范](device-db-format.md)。
+
+### 与旧 NearBy One NEXT `.nbdb` 的关系（重要）
+
+**旧项目源码在本环境中不可用**，仓库里只有 provisioning 文档第 9 节的复用矩阵，
+其中描述 `db_storage.c` 与浏览器端预检，但没有文件布局。
+
+因此本容器**从零定义，不假设与旧 `.nbdb` 的线格式兼容**。沿用扩展名只是因为产品文档
+把文件名固定为 `devices.nbdb`；`format_version` / `schema_version` / `reader_abi` 三个
+显式版本字段保证无法识别的文件被判为 `INCOMPATIBLE` 而不是被误读。若日后取得旧格式，
+可写一次性转换器target `format_version = 1`，无需改动读取器。
+
+### 已交付
+
+| 交付 | 说明 |
+|---|---|
+| `firmware/main/device_db_format.{c,h}` | 校验式读取器；每次访问都视文件值为敌意输入，偏移与长度用 64 位运算检测溢出 |
+| `docs/device-db-format.md` | 规范：字节序、布局、版本、索引、校验覆盖、拒绝规则、确定性 |
+| `tools/device_db/nbdb.py` | 写入器（生成侧契约） |
+| `tools/device_db/build_device_db.py` | 确定性生成器，带来源清单与 provenance gate |
+| `tools/device_db/validate_device_db.py` | 独立验证器，从字节重新解析 |
+| `tools/device_db/make_invalid_fixtures.py` | 生成 29 个单一变异的损坏样本 |
+
+关键格式决定：
+
+- 小端、逐字节拼装，**结构体布局不属于格式**；
+- `header_crc32` 与 `body_crc32` 覆盖范围不同，因此"头部损坏"与"主体损坏"可区分；
+- 16 MiB 硬上限，避免恶意 size 字段驱动大分配；
+- 索引是 2 的幂桶表，**从不丢条目**：溢出桶置标志，多余条目进入连续溢出区；
+  索引只是加速器，调用者必须回到 fingerprint 记录确认；
+- 写实体必须真有可写 recipe；`WRITE_CONTROL` 必须伴随 `USER_ACTION_REQUIRED`；
+  永不安全的身份类型（BLE 随机地址、BSSID、IP、RSSI、SSID、型号、
+  Matter VID/PID 单独）只能记为 `UNSAFE`，可展示但不可用于合并。
+
+provenance gate：仅由 `REFERENCE_ONLY` 材料支撑的 profile 会被生成器**拒绝**，
+不会进入产出文件。
+
+fixture **仅用于测试**：`tests/fixtures` 不被固件构建引用，flash 内没有回退匹配器，
+唯一生产语料是 SD 上的 `/nearby/db/devices.nbdb`。
+
+### 本轮修掉的自身缺陷
+
+1. Python CRC-32 辅助函数有运算符优先级错误（`&` 比 `^` 紧），算出的校验和是错的；
+2. `nbdb.py` 原用一条长 `struct` 格式写 recipe/profile，曾已悄悄错位字段；
+   现改为按规范偏移逐字段写入，消除该类问题；
+3. 独立验证器对"原始键"取哈希，而生成器对"规范化键"取哈希，验证器错了。
+   键规范化已明确写入规范 §5.4.1 并作为契约由 `device_db_canonical_key_hash()` 实现。
 
 ### 仍然阻塞 / 未完成
 
-- **B4—B11 未开始**（Device DB、SD 读取与匹配、配网与 Web 管理、BLE GATT/ESPHome、
+- **B5—B11 未开始**（SD 读取与匹配、配网与 Web 管理、BLE GATT/ESPHome、
   Zigbee 原生后端、OpenThread/Matter、统一控制与确认、整机验收）。
-- `lan_services`、`thread`、`zigbee`、`enrichment` 四个阶段仍为空实现。
-- **实板验证全部待办**：本轮无实板，未烧录、未做射频互操作、未测量内存峰值、
-  未验证串口真实输出与恢复行为。CI 通过只证明编译与 host 规则测试。
+- `thread`、`zigbee`、`enrichment` 三个阶段仍为空实现（分别归 B8/B9 与 B5）。
+- **实板验证全部待办**：未烧录、未做射频互操作、**未测量任何 RAM/栈余量**、
+  未验证串口真实输出与恢复行为、未对真实局域网验证服务探测。
+  CI 通过只证明编译与 host 规则测试。
 - Matter 独立构建仍未修复（在 `research/matter-chip-tool-l2-api`）。
 

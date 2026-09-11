@@ -194,9 +194,40 @@ B1—B3 的“真实扫描→设备状态→串口输出”尚未跑通，不得
 `ha_core_device_remove()` 两个必要补充。
 
 **阶段实现状态（逐项）**：`wifi_rf`、`ble_rf`、`mdns`、`ssdp`、`lan_hosts`、`materialize`
-已接入真实后端；`lan_services`、`thread`、`zigbee`、`enrichment` **仍为空实现**，
-记为 `skipped` 并携带明确原因，因此局部扫描不会被呈现为全协议完成。
+已接入真实后端；`thread`、`zigbee`、`enrichment` **仍为空实现**，记为 `skipped` 并携带明确原因，
+因此局部扫描不会被呈现为全协议完成。`lan_services` 随后在同一轮补完，见下。
 
-**实板验证仍全部待办**：未烧录、未做射频互操作、未测量内存峰值、未验证串口真实输出与
+**实板验证仍全部待办**：未烧录、未做射频互操作、**未测量任何 RAM/栈余量**、未验证串口真实输出与
 有线恢复行为。CI 通过只证明编译与 host 规则测试，不能替代实板结论。
+
+## 执行记录：lan_services（B2 收尾，2026-09-11）
+
+`lan_services` 原以 `not_implemented` 记为 `skipped`，现接入真实 Nmap 服务探测。
+范围刻意收窄，因为它是唯一会向其他设备发起 TCP 连接的阶段：目标只取已判定 up 的主机
+（上限 16），固定 8 个知名端口（HTTP/HTTPS/SSH/Telnet/ESPHome 6053/MQTT/RTSP/9100），
+仅 PASSIVE 探测档且捕获上限 256 字节，不写入、不尝试凭据、不发协议专用载荷，
+端口扫描与服务扫描共用一个 deadline 并在两半之间检查取消。
+没有开放端口不算失败；无目标可探测返回成功而非错误。
+
+**未验证**：该阶段只能在 ESP-IDF 下编译，host 无法执行；端口探测与服务识别
+**尚未对真实局域网验证**，标为待实板验证。
+
+CI run `34622080671` 全绿：**14 组 host tests、`failed groups: 0`**，esp32c6 构建成功。
+
+## 执行记录：B4（2026-09-11）
+
+已合并。CI run `34620547055` 全绿：14 组 host tests（新增 `device_db_python` 36 checks、
+`device_db_format` 200 checks），esp32c6 构建成功。
+
+交付 `.nbdb` 容器规范（[device-db-format.md](device-db-format.md)）、固件校验式读取器、
+确定性主机生成器、独立验证器，以及 29 个单一变异的损坏样本。
+fixture **仅用于测试**，不被固件构建引用；生产语料只放 SD。
+
+**关于旧项目格式**：旧 NearBy One NEXT 源码在本环境中**不可用**，仓库内只有 provisioning
+文档第 9 节的复用矩阵，其中没有文件布局。因此本容器从零定义，**不假设与旧 `.nbdb` 线格式
+兼容**，并以 `format_version`/`schema_version`/`reader_abi` 三个版本字段保证无法识别的文件
+被判为 `INCOMPATIBLE` 而非误读。若日后取得旧格式，可写一次性转换器，无需改动读取器。
+
+下一步为 B5（SD 按需读取、匹配、decoder/quirk 选择、Entity 配方，并实现 `enrichment` 阶段），
+随后 B6。
 
