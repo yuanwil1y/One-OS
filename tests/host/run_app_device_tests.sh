@@ -6,6 +6,11 @@
 # sweep and read-only rules rather than a mock of them. Recognition itself is
 # supplied by the test as a stub recognizer, which is what keeps this group free
 # of any filesystem dependency.
+#
+# app_recognition.c asks the Theengs and ZHA families which decoder/quirk ids they
+# carry. Those two components are not otherwise built here, so
+# tests/host/stubs/app_l2_lookup_stub.c supplies the answers for the ids the
+# fixture corpus names; see tests/host/stubs/README.md.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -26,6 +31,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/firmware/main/app_scan.c" \
   "$ROOT/firmware/main/app_recognition.c" \
   "$ROOT/firmware/main/app_device.c" \
+  "$ROOT/tests/host/stubs/app_l2_lookup_stub.c" \
   "$ROOT/tests/host/test_app_device.c" \
   -o "$OUT"
 
