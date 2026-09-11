@@ -110,11 +110,25 @@ size_t app_entity_count_for_device(const char *device_id);
  * Generation lifecycle.
  *
  * begin() advances the application generation and marks every ephemeral binding
- * as not-yet-seen. finish() sweeps ephemeral bindings that were not seen again
- * and marks everything else stale rather than deleting it.
+ * as not-yet-seen.
+ *
+ * finish() is source-aware. A device is only swept when at least one of the
+ * protocols that observed it actually ran in this generation and did not report
+ * it again. A device whose protocols were all skipped (for example "no IP"),
+ * canceled or failed is kept and marked STALE instead: "this protocol never got
+ * a chance to look" is not evidence that the device disappeared, and treating it
+ * as such would mass-delete devices on any partial scan.
+ *
+ * `scan` may be NULL, in which case nothing is swept and every unseen ephemeral
+ * device is marked stale - the conservative choice.
  */
 void app_device_generation_begin(uint32_t generation);
-void app_device_generation_finish(void);
+void app_device_generation_finish(const app_scan_status_t *scan);
+
+/* True when a stage ran far enough to have observed its protocol this
+ * generation. Used to decide whether absence of evidence means anything. */
+bool app_scan_stage_was_observed(const app_scan_status_t *scan,
+                                 app_scan_stage_t stage);
 
 /* Materialise every observation in `ev` into HA Device/Entity/State.
  *

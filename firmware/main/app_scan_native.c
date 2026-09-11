@@ -267,26 +267,31 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
         (void)kismet_wifi_session_cancel(session);
     }
 
-    /* 3. Wait for the bounded duration. A timeout here is not an error: the
-     *    session owns its own duration and cancel path. */
+    /*
+     * 3. Wait for the bounded duration.
+     *
+     * A wait timeout is not by itself an error: the session owns its own
+     * duration and cancel path. What matters is that we only touch the tracker
+     * once the session task can no longer be running, because the tracker is
+     * mutated from that task's callbacks. `stopped` records whether we actually
+     * observed completion.
+     */
+    bool stopped = false;
     err = kismet_wifi_session_wait(session, cfg.wifi_duration_ms + 3000u);
-    if (err == ESP_ERR_TIMEOUT) {
-        /* Ask it to stop, then wait a bounded while longer. */
+    if (err == ESP_OK) {
+        stopped = true;
+    } else {
         (void)kismet_wifi_session_cancel(session);
         err = kismet_wifi_session_wait(session, 3000u);
-        if (err == ESP_ERR_TIMEOUT) {
+        if (err == ESP_OK) {
+            stopped = true;
+        } else {
             ESP_LOGE(TAG, "kismet wifi session did not stop in time");
         }
     }
 
     memset(&result, 0, sizeof(result));
     (void)kismet_wifi_session_get_result(session, &result);
-
-    /* 4. Copy bounded evidence BEFORE destroying the session: the tracker is
-     *    owned by this function, but the evidence must survive it. */
-    ingest_wifi_tracker(ev, tracker);
-    enrich_wifi_from_tracker(ev, tracker);
-    (void)kismet_wifi_tracker_get_stats(tracker, &tracker_stats);
 
     if (stats != NULL) {
         stats->wifi_queue_drops = result.rx_queue_drops;
@@ -297,8 +302,33 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
         stats->frames_parsed += result.frames_delivered;
     }
 
+    /*
+     * 4. Destroy the session BEFORE reading the tracker.
+     *
+     * The session task is the only writer of the tracker, and destroy() blocks
+     * until that task has finished. Reading the tracker first would be a data
+     * race against a still-running session whenever the wait above timed out.
+     * The evidence store (`ev`) is likewise only safe to read here: it is written
+     * from the session's frame callback.
+     */
     kismet_wifi_session_destroy(session);
     session = NULL;
+
+    if (stopped) {
+        ingest_wifi_tracker(ev, tracker);
+        enrich_wifi_from_tracker(ev, tracker);
+        (void)kismet_wifi_tracker_get_stats(tracker, &tracker_stats);
+    } else {
+        /* The session never confirmed completion, so the tracker may be in an
+         * unknown state. Do not publish evidence we cannot vouch for; the frame
+         * callback may already have copied some of it, and the stage is reported
+         * as a failure by the native_error/timed-out path below. */
+        ESP_LOGW(TAG, "wifi evidence discarded: session did not confirm stop");
+        if (stats != NULL) {
+            stats->wifi_native_error = ESP_ERR_TIMEOUT;
+        }
+    }
+
     kismet_wifi_tracker_destroy(tracker);
     tracker = NULL;
 
@@ -306,7 +336,7 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
         err = result.native_error;
         goto restore;
     }
-    err = ESP_OK;
+    err = stopped ? ESP_OK : ESP_ERR_TIMEOUT;
 
 restore:
     /* 5. Always give the driver back, even on failure: otherwise the device
@@ -316,14 +346,12 @@ restore:
         if (restore_err != ESP_OK) {
             ESP_LOGW(TAG, "wifi restore after scan failed: %s",
                      esp_err_to_name(restore_err));
-            if (err == ESP_OK) {
-                /* The RF stage itself succeeded; the restore failure is reported
-                 * to the caller separately through the Wi-Fi status. */
-                ESP_LOGW(TAG, "STA connectivity not restored");
-            }
         }
     }
 
+    if (session != NULL) {
+        kismet_wifi_session_destroy(session);
+    }
     if (tracker != NULL) {
         kismet_wifi_tracker_destroy(tracker);
     }
@@ -461,11 +489,16 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
         (void)kismet_ble_session_cancel(session);
     }
 
+    bool stopped = false;
     err = kismet_ble_session_wait(session, cfg.ble_duration_ms + 5000u);
-    if (err == ESP_ERR_TIMEOUT) {
+    if (err == ESP_OK) {
+        stopped = true;
+    } else {
         (void)kismet_ble_session_cancel(session);
         err = kismet_ble_session_wait(session, 5000u);
-        if (err == ESP_ERR_TIMEOUT) {
+        if (err == ESP_OK) {
+            stopped = true;
+        } else {
             ESP_LOGE(TAG, "kismet ble session did not stop in time");
         }
     }
@@ -480,9 +513,19 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
         stats->frames_truncated += result.truncated_reports;
     }
 
+    /* Destroy first: destroy() blocks until the session task has finished, so
+     * this is the point after which the tracker and the report callback can no
+     * longer touch the evidence store. */
     kismet_ble_session_destroy(session);
     kismet_ble_tracker_destroy(tracker);
 
+    if (!stopped) {
+        /* A session that never confirmed stop may still have been mid-report; its
+         * evidence is not trustworthy, so the stage is reported as timed out
+         * rather than as a successful scan. */
+        ESP_LOGW(TAG, "ble session did not confirm stop; reporting timeout");
+        return ESP_ERR_TIMEOUT;
+    }
     return result.native_error;
 }
 
