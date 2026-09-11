@@ -102,7 +102,6 @@ static esp_err_t load_credentials(void)
     esp_err_t err;
     size_t ssid_len = sizeof(s_ctx.ssid);
     uint8_t configured = 0;
-    size_t configured_len = sizeof(configured);
 
     s_ctx.credentials_present = false;
     s_ctx.ssid[0] = '\0';

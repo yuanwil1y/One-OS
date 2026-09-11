@@ -21,3 +21,7 @@ msg*.txt
 *-cleanup-msg.txt
 __pycache__/
 *.pyc
+.pr-*.md
+tools/msg-*.txt
+tools/pr-*.md
+tools/ci_getjobs.js

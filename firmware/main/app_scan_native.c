@@ -15,6 +15,7 @@
 
 #include "app_wifi.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_timer.h"
 #include "ha_discovery.h"
 #include "kismet_ble.h"
@@ -39,6 +40,9 @@ static const char *TAG = "app_scan";
 #define SCAN_NMAP_MAX_HOSTS 16u
 #define SCAN_NMAP_MAX_PORTS 8u
 #define SCAN_NMAP_MAX_ENDPOINTS 8u
+/* Bytes read from a service before giving up. Bounded so a chatty or hostile
+ * peer cannot make the prober read indefinitely. */
+#define SCAN_SERVICE_CAPTURE_BYTES 256u
 
 static volatile bool s_cancel;
 
@@ -531,6 +535,77 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
 
 /* ================= LAN stages ================= */
 
+/*
+ * Caller-owned collection for the port scan.
+ *
+ * The Nmap port callback runs on the Nmap scan task, so the endpoints array must
+ * be owned by a frame that outlives the scan. The worker blocks in
+ * nmap_port_scan_wait() and only reads the collection after the scan has
+ * finished, which is the same ordering discipline used for the RF stages.
+ */
+typedef struct {
+    nmap_service_endpoint_t *endpoints;
+    uint16_t capacity;
+    uint16_t count;
+    uint16_t overflows;
+} nmap_port_collect_t;
+
+static void nmap_port_cb(const nmap_port_result_t *result, void *ctx)
+{
+    nmap_port_collect_t *collect = (nmap_port_collect_t *)ctx;
+
+    if (collect == NULL || result == NULL) {
+        return;
+    }
+    /* Only open ports are worth probing, and only ports the service prober can
+     * actually identify. */
+    if (result->state != NMAP_PORT_OPEN) {
+        return;
+    }
+    if (collect->count >= collect->capacity) {
+        collect->overflows++;
+        return;
+    }
+    collect->endpoints[collect->count].target = result->target;
+    collect->endpoints[collect->count].port = result->port;
+    /* PASSIVE avoids sending anything beyond connecting; it is enough to classify
+     * a service that greets first (SSH, SMTP, HTTP banners). */
+    collect->endpoints[collect->count].probe_profile = NMAP_SERVICE_PROBE_PASSIVE;
+    collect->count++;
+}
+
+static void nmap_service_cb(const nmap_service_result_t *result, void *ctx)
+{
+    app_scan_evidence_t *ev = (app_scan_evidence_t *)ctx;
+    app_scan_lan_t obs;
+    char ipv4[APP_SCAN_MAX_IPV4];
+    uint32_t addr;
+
+    if (ev == NULL || result == NULL) {
+        return;
+    }
+    addr = result->target.addr_be;
+    (void)snprintf(ipv4, sizeof(ipv4), "%u.%u.%u.%u",
+                   (unsigned)((addr >> 24) & 0xFFu), (unsigned)((addr >> 16) & 0xFFu),
+                   (unsigned)((addr >> 8) & 0xFFu), (unsigned)(addr & 0xFFu));
+
+    memset(&obs, 0, sizeof(obs));
+    obs.generation = ev->generation;
+    (void)app_strlcpy(obs.ipv4, ipv4, sizeof(obs.ipv4));
+    obs.from_nmap = true;
+    obs.up = true;
+    obs.service_count = 1u;
+    /* A service name is only recorded when the prober identified one. An
+     * unidentified open port still counts as a service, but no name is invented
+     * for it. */
+    if (result->service_name[0] != '\0') {
+        (void)app_strlcpy(obs.service, result->service_name, sizeof(obs.service));
+    }
+    obs.first_seen_ms = now_ms();
+    obs.last_seen_ms = obs.first_seen_ms;
+    (void)app_scan_ingest_lan(ev, &obs);
+}
+
 static void lan_note_mdns(app_scan_evidence_t *ev, const ha_mdns_service_t *service)
 {
     app_scan_lan_t obs;
@@ -669,7 +744,7 @@ static void nmap_host_cb(const nmap_host_result_t *result, void *ctx)
     app_scan_evidence_t *ev = (app_scan_evidence_t *)ctx;
     app_scan_lan_t obs;
     char ipv4[APP_SCAN_MAX_IPV4];
-    uint32_t addr = result->target.addr_be;
+    uint32_t addr;
 
     if (ev == NULL || result == NULL) {
         return;
@@ -677,6 +752,7 @@ static void nmap_host_cb(const nmap_host_result_t *result, void *ctx)
     if (result->state != NMAP_HOST_UP) {
         return;
     }
+    addr = result->target.addr_be;
 
     (void)snprintf(ipv4, sizeof(ipv4), "%u.%u.%u.%u",
                    (unsigned)((addr >> 24) & 0xFFu), (unsigned)((addr >> 16) & 0xFFu),
@@ -750,12 +826,162 @@ esp_err_t app_scan_native_lan_services(app_scan_evidence_t *ev,
                                        const app_scan_native_config_t *config,
                                        app_scan_native_stats_t *stats)
 {
-    (void)ev;
-    (void)config;
-    (void)stats;
+    /*
+     * Service discovery for hosts the previous stage already found.
+     *
+     * Scope is deliberately narrow, because this is the only stage that opens
+     * TCP connections to other people's devices:
+     *
+     *   - only hosts that LAN_HOSTS already observed as up, capped at
+     *     SCAN_NMAP_MAX_HOSTS;
+     *   - a fixed, short port list of well-known management/service ports,
+     *     capped at SCAN_NMAP_MAX_PORTS;
+     *   - connect() probes and at most a bounded passive read, never a write and
+     *     never a guess at credentials;
+     *   - one shared deadline for both the port scan and the service scan, so the
+     *     whole stage is finite;
+     *   - cancellation is checked between the two halves.
+     *
+     * A host that yields no open port is not an error: it simply contributes no
+     * service evidence.
+     */
+    static const uint16_t k_probe_ports[SCAN_NMAP_MAX_PORTS] = {
+        80u,   /* HTTP */
+        443u,  /* HTTPS */
+        22u,   /* SSH */
+        23u,   /* Telnet */
+        6053u, /* ESPHome Native API */
+        1883u, /* MQTT */
+        554u,  /* RTSP */
+        9100u, /* raw printing */
+    };
 
-    /* Service probing builds on port-scan results and is intentionally left for
-     * a later step; reporting NOT_IMPLEMENTED keeps an unfinished stage from
-     * looking complete. */
-    return ESP_ERR_NOT_SUPPORTED;
+    nmap_ipv4_target_t targets[SCAN_NMAP_MAX_HOSTS];
+    nmap_service_endpoint_t endpoints[SCAN_NMAP_MAX_ENDPOINTS];
+    nmap_port_scan_config_t port_cfg;
+    nmap_service_scan_config_t service_cfg;
+    nmap_scan_handle_t scan = NULL;
+    nmap_scan_summary_t summary;
+    uint32_t timeout;
+    uint32_t deadline;
+    uint16_t target_count = 0u;
+    uint16_t endpoint_count = 0u;
+    esp_err_t err;
+
+    if (ev == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!wifi_mgr_has_ip()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (ev->lan_count == 0u) {
+        /* Nothing to probe. Not a failure: LAN_HOSTS may simply have found no
+         * hosts, or may not have run at all. */
+        return ESP_OK;
+    }
+
+    timeout = (config != NULL && config->nmap_timeout_ms != 0u)
+                  ? config->nmap_timeout_ms
+                  : SCAN_NMAP_DEFAULT_TIMEOUT_MS;
+    deadline = now_ms() + timeout;
+
+    /* Collect bounded targets from the evidence already gathered.
+     *
+     * The address is parsed with esp_netif_str_to_ip4() rather than sscanf: it
+     * accepts exactly dotted-quad IPv4 and rejects anything else, reports its own
+     * error instead of relying on a count, and avoids the uint32_t vs unsigned int
+     * mismatch that a "%u" scanf has. */
+    for (size_t i = 0u; i < ev->lan_count && target_count < SCAN_NMAP_MAX_HOSTS; ++i) {
+        esp_ip4_addr_t parsed;
+
+        if (esp_netif_str_to_ip4(ev->lan[i].ipv4, &parsed) != ESP_OK) {
+            continue;
+        }
+        if (parsed.addr == 0u) {
+            /* 0.0.0.0 is not a probe target. */
+            continue;
+        }
+        targets[target_count].addr_be = parsed.addr;
+        ++target_count;
+    }
+    if (target_count == 0u) {
+        return ESP_OK;
+    }
+
+    /* ---- 1. which of the well-known ports are actually open ------------ */
+    {
+        nmap_port_collect_t collect;
+
+        memset(&collect, 0, sizeof(collect));
+        collect.endpoints = endpoints;
+        collect.capacity = SCAN_NMAP_MAX_ENDPOINTS;
+
+        memset(&port_cfg, 0, sizeof(port_cfg));
+        port_cfg.targets = targets;
+        port_cfg.target_count = target_count;
+        port_cfg.ports = k_probe_ports;
+        port_cfg.port_count = (uint16_t)(sizeof(k_probe_ports) / sizeof(k_probe_ports[0]));
+        port_cfg.timing = nmap_timing_policy_default();
+        port_cfg.timing.scan_timeout_ms = timeout / 2u;
+        port_cfg.result_cb = nmap_port_cb;
+        port_cfg.user_ctx = &collect;
+
+        err = nmap_port_scan_start(&port_cfg, &scan);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (s_cancel) {
+            (void)nmap_port_scan_cancel(scan);
+        }
+        err = nmap_port_scan_wait(scan, timeout / 2u + 2000u);
+        memset(&summary, 0, sizeof(summary));
+        (void)nmap_scan_get_summary(scan, &summary);
+
+        if (err == ESP_ERR_TIMEOUT) {
+            (void)nmap_port_scan_cancel(scan);
+            (void)nmap_port_scan_wait(scan, 2000u);
+            return ESP_ERR_TIMEOUT;
+        }
+        if (summary.terminal_error != ESP_OK) {
+            return summary.terminal_error;
+        }
+
+        endpoint_count = collect.count;
+    }
+
+    if (endpoint_count == 0u) {
+        /* No open well-known ports anywhere: nothing further to probe. */
+        return ESP_OK;
+    }
+    if (s_cancel || now_ms() >= deadline) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* ---- 2. bounded service identification on those endpoints ---------- */
+    memset(&service_cfg, 0, sizeof(service_cfg));
+    service_cfg.endpoints = endpoints;
+    service_cfg.endpoint_count = endpoint_count;
+    service_cfg.capture_bytes = SCAN_SERVICE_CAPTURE_BYTES;
+    service_cfg.timing = nmap_timing_policy_default();
+    service_cfg.timing.scan_timeout_ms = timeout / 2u;
+    service_cfg.result_cb = nmap_service_cb;
+    service_cfg.user_ctx = ev;
+
+    err = nmap_service_scan_start(&service_cfg, &scan);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (s_cancel) {
+        (void)nmap_service_scan_cancel(scan);
+    }
+    err = nmap_service_scan_wait(scan, timeout / 2u + 2000u);
+    memset(&summary, 0, sizeof(summary));
+    (void)nmap_scan_get_summary(scan, &summary);
+
+    if (err == ESP_ERR_TIMEOUT) {
+        (void)nmap_service_scan_cancel(scan);
+        (void)nmap_service_scan_wait(scan, 2000u);
+        return ESP_ERR_TIMEOUT;
+    }
+    return summary.terminal_error;
 }
