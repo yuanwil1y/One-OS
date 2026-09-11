@@ -178,6 +178,16 @@ const ha_entity_t *ha_core_entity_get(const char *entity_id);
 size_t ha_core_entity_count_for_device(const char *device_id);
 const ha_entity_t *ha_core_entity_at_for_device(const char *device_id, size_t index);
 
+/*
+ * Total number of entities in the fixed pool.
+ *
+ * The per-device form answers "what does this device expose"; this one answers "how
+ * much of the pool is in use", which is what a capacity check, a leak check and an
+ * orphan check between the application table and this one all need. Counting through
+ * each device instead would miss exactly the orphan those checks exist to find.
+ */
+size_t ha_core_entity_count(void);
+
 ha_core_status_t ha_core_state_set(
     const char *entity_id,
     const char *state,

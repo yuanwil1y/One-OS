@@ -398,6 +398,27 @@ const ha_entity_t *ha_core_entity_at_for_device(const char *device_id, size_t in
     return NULL;
 }
 
+size_t ha_core_entity_count(void)
+{
+    size_t count = 0;
+
+    /*
+     * The total, not per device.
+     *
+     * The per-device form answers "what does this device expose"; this one answers "how
+     * much of the fixed entity pool is in use", which is what a capacity check, a leak
+     * check and the integrity test between the application table and this one all need.
+     * Counting through each device instead would silently miss an entity whose device
+     * had been removed without it - the orphan case those checks exist to find.
+     */
+    for (size_t i = 0; i < HA_CORE_MAX_ENTITIES; ++i) {
+        if (s_entities[i].in_use) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 ha_core_status_t ha_core_state_set(
     const char *entity_id,
     const char *state,
