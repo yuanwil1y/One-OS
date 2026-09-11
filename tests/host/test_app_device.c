@@ -299,10 +299,16 @@ static void test_repeat_materialize_does_not_grow(void)
 }
 
 /*
- * Build a scan report in which the given stages completed. The source-aware
+ * Build a scan report in which up to two stages completed. The source-aware
  * sweep only treats absence as evidence for protocols whose stage actually ran,
  * so tests must state which stages observed the environment.
+ *
+ * SCAN_NO_STAGE is the "none" sentinel. It is APP_STAGE_COUNT, which is not a
+ * valid index, and the bounds check below makes an out-of-range value impossible
+ * rather than merely unlikely.
  */
+#define SCAN_NO_STAGE APP_STAGE_COUNT
+
 static app_scan_status_t scan_report_with(app_scan_stage_t a, app_scan_stage_t b)
 {
     app_scan_status_t scan;
@@ -312,8 +318,10 @@ static app_scan_status_t scan_report_with(app_scan_stage_t a, app_scan_stage_t b
     for (int i = 0; i < (int)APP_STAGE_COUNT; ++i) {
         scan.states[i] = APP_STAGE_STATE_SKIPPED;
     }
-    scan.states[a] = APP_STAGE_STATE_DONE;
-    if (b >= 0) {
+    if ((int)a >= 0 && (int)a < (int)APP_STAGE_COUNT) {
+        scan.states[a] = APP_STAGE_STATE_DONE;
+    }
+    if ((int)b >= 0 && (int)b < (int)APP_STAGE_COUNT) {
         scan.states[b] = APP_STAGE_STATE_DONE;
     }
     return scan;
@@ -327,7 +335,7 @@ static void test_generation_sweeps_unseen_ephemeral(void)
     bool truncated = false;
     /* The Wi-Fi stage really ran in both generations. */
     app_scan_status_t scan = scan_report_with(APP_STAGE_WIFI_RF,
-                                              (app_scan_stage_t)-1);
+                                              SCAN_NO_STAGE);
 
     app_device_table_reset();
 
@@ -399,7 +407,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     app_device_generation_begin(2u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
     (void)app_device_materialize(&ev, &truncated);
-    scan = scan_report_with(APP_STAGE_BLE_RF, (app_scan_stage_t)-1);
+    scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
 
@@ -426,7 +434,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
     (void)app_device_materialize(&ev, &truncated);
-    scan = scan_report_with(APP_STAGE_BLE_RF, (app_scan_stage_t)-1);
+    scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
 
@@ -450,7 +458,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
     (void)app_device_materialize(&ev, &truncated);
-    scan = scan_report_with(APP_STAGE_WIFI_RF, (app_scan_stage_t)-1);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
     CHECK(app_device_count() == 1u, "device present");
@@ -459,7 +467,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     (void)app_device_materialize(&ev, &truncated);
-    scan = scan_report_with((app_scan_stage_t)-1, (app_scan_stage_t)-1);
+    scan = scan_report_with(SCAN_NO_STAGE, SCAN_NO_STAGE);
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_CANCELED;
     scan.generation = 2u;
     app_device_generation_finish(&scan);
@@ -503,7 +511,7 @@ static void test_stale_devices_do_not_accumulate_over_many_generations(void)
         app_device_generation_begin(gen);
         feed_wifi(&ev, bssid, "AP", -50, (uint8_t)gen, (uint64_t)gen * 100u);
         (void)app_device_materialize(&ev, &truncated);
-        scan = scan_report_with(APP_STAGE_WIFI_RF, (app_scan_stage_t)-1);
+        scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
         scan.generation = gen;
         app_device_generation_finish(&scan);
         CHECK(app_device_count() == 1u, "generation %u kept one device, got %u",
