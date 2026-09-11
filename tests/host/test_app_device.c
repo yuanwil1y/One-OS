@@ -423,19 +423,13 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
               "ha_core still holds the wifi device");
     }
     {
-        const app_device_binding_t *ble_dev = app_device_find("ble_007000000002");
+        /*
+         * The device id is the protocol prefix plus <address-type><mac>, so a
+         * type-0 device whose address is 70:00:00:00:00:02 becomes
+         * ble_00700000000002 (six zeros: the type byte, then the mac).
+         */
+        const app_device_binding_t *ble_dev = app_device_find("ble_00700000000002");
         CHECK(ble_dev != NULL, "ble device present");
-        if (ble_dev == NULL) {
-            /* Dump what is actually registered so a failure is diagnosable. */
-            printf("  registered devices (%u):\n", (unsigned)app_device_count());
-            for (size_t i = 0u; i < app_device_count(); ++i) {
-                const app_device_binding_t *b = app_device_at(i);
-                printf("    [%u] id=%s sources=0x%x avail=%s gen=%lu\n",
-                       (unsigned)i, b->device_id, (unsigned)b->sources,
-                       app_availability_name(b->availability),
-                       (unsigned long)b->last_generation);
-            }
-        }
         CHECK(ble_dev != NULL && ble_dev->availability == APP_AVAILABILITY_ONLINE,
               "ble device refreshed and online (avail=%s)",
               ble_dev ? app_availability_name(ble_dev->availability) : "absent");
@@ -450,7 +444,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     scan.generation = 3u;
     app_device_generation_finish(&scan);
 
-    CHECK(app_device_find("ble_007000000002") == NULL,
+    CHECK(app_device_find("ble_00700000000002") == NULL,
           "device from a protocol that ran and missed it is swept");
     CHECK(app_device_find("wifi_700000000001") != NULL,
           "device from the unrun protocol is still kept");
