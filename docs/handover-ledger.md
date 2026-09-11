@@ -23,7 +23,8 @@
 | 仓库 | `https://github.com/yuanwil1y/One-OS` |
 | 当前分支 | `feat/b6-http-portal`（B6 剩余工作） |
 | 已合并 | PR [#20](https://github.com/yuanwil1y/One-OS/pull/20) **已 merged**（merge commit `74facd3`）：B5 与 B6 前半部分进入 main |
-| main | `74facd3` |
+| 进行中 | PR [#21](https://github.com/yuanwil1y/One-OS/pull/21)（**draft**）：B6 临时配网 AP，CI green |
+| main | `74facd3`，CI green（run [34635862479](https://github.com/yuanwil1y/One-OS/actions/runs/34635862479)） |
 | 目标硬件 | Waveshare ESP32-C6-Touch-LCD-1.9，ESP-IDF v6.1，无 PSRAM，8 MB flash |
 
 ### 远端分支情况（实测，非文档推断）
@@ -133,7 +134,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | `app_db_import.{c,h}` | 数据库替换状态机：分块流式写入、双重长度校验、容量与空间预检、`.part` 清理、**全量校验后才替换**、失败回滚；FAT 无原子 rename，因此序列设计为任意中断点都可恢复 | `app_db_import` 150 checks |
 | `app_portal.{c,h}` | 请求/响应线层：表单解码（含 `%00` 拒绝）、Content-Length 解析、JSON 构建（SSID 十六进制、无密码字段、缓冲区不足则**什么都不写**）、临时 AP 密码生成 | `app_portal` 95 checks |
 | `app_provision.{c,h}` | 会话编排：操作门互斥、射频交接顺序与回滚、会话超时、**替换期间关闭并重开 reader**、令牌恒定时间比较 | `app_provision` 120 checks |
-| `wifi_mgr_ap_*`（`app_wifi.c`） | 临时配网 AP：只在 `release_for_scan` 与 `restore_after_scan` 之间运行，所以驱动不会在活着的 STA 上被重新初始化；短于 8 字符的密码被拒绝而不是静默降级成开放 AP；射频被隔离时拒绝启动 | **无 host 测试**（ESP-IDF 专属），只有目标构建证明它能编译 |
+| `wifi_mgr_ap_*`（`app_wifi.c`） | 临时配网 AP：只在 `release_for_scan` 与 `restore_after_scan` 之间运行，所以驱动不会在活着的 STA 上被重新初始化；短于 8 字符的密码被拒绝而不是静默降级成开放 AP；射频被隔离时拒绝启动 | 无 host 测试（ESP-IDF 专属）；**目标构建已通过**（PR #21，run 34636417815） |
 
 ### B6 未完成项
 
