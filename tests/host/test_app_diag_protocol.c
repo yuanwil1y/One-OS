@@ -140,6 +140,54 @@ static void test_parse_control(void)
     }
 }
 
+/*
+ * `request <id> portal <start|stop|status>`
+ *
+ * The verb is the only operand, and it travels in `action` because that is the field the
+ * runtime already has for "what to do". Both facts are pinned here so a later change to
+ * the request structure cannot move it silently.
+ */
+static void test_parse_portal(void)
+{
+    app_diag_request_t req;
+
+    CHECK(app_diag_parse("request 50 portal start", &req) == APP_DIAG_OK,
+          "portal start parses");
+    CHECK(req.command == APP_DIAG_CMD_PORTAL, "and is the portal command");
+    CHECK(strcmp(req.action, "start") == 0, "carrying the verb, got '%s'", req.action);
+    CHECK(req.target[0] == '\0' && req.value[0] == '\0',
+          "with no other operand, so nothing can carry a secret");
+
+    CHECK(app_diag_parse("request 51 portal stop", &req) == APP_DIAG_OK,
+          "portal stop parses");
+    CHECK(strcmp(req.action, "stop") == 0, "carrying stop");
+    CHECK(app_diag_parse("request 52 portal status", &req) == APP_DIAG_OK,
+          "portal status parses");
+    CHECK(strcmp(req.action, "status") == 0, "carrying status");
+
+    /* The verb is required and there is exactly one: a missing verb is a bad request, and
+     * an extra operand is refused rather than ignored. */
+    CHECK(app_diag_parse("request 53 portal", &req) == APP_DIAG_ERR_BAD_REQUEST,
+          "portal without a verb is refused");
+    CHECK(app_diag_parse("request 54 portal start extra", &req) ==
+              APP_DIAG_ERR_BAD_REQUEST,
+          "portal with an extra operand is refused");
+    {
+        char line[APP_DIAG_MAX_LINE];
+        char operand[APP_DIAG_TOKEN_LEN + 16];
+
+        memset(operand, 'x', sizeof(operand) - 1u);
+        operand[sizeof(operand) - 1u] = '\0';
+        snprintf(line, sizeof(line), "request 55 portal %s", operand);
+        CHECK(app_diag_parse(line, &req) == APP_DIAG_ERR_INVALID_ARGUMENT,
+              "an over-long verb is rejected rather than truncated");
+    }
+
+    /* The portal command has a stable name: it appears in diagnostics and in the help. */
+    CHECK(strcmp(app_diag_command_name(APP_DIAG_CMD_PORTAL), "portal") == 0,
+          "the command name is stable");
+}
+
 static void test_parse_rejects_malformed(void)
 {
     app_diag_request_t req;
@@ -336,6 +384,7 @@ int main(void)
     test_parse_scan_variants();
     test_parse_cancel_devices_entities();
     test_parse_control();
+    test_parse_portal();
     test_parse_rejects_malformed();
     test_parse_tolerates_crlf();
     test_format_response();

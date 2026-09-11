@@ -47,7 +47,8 @@ static const char *const k_help_text =
     "  request <id> cancel [target_request_id]\n"
     "  request <id> devices\n"
     "  request <id> entities [device_id]\n"
-    "  request <id> control <entity_id> <action> [value]\n";
+    "  request <id> control <entity_id> <action> [value]\n"
+    "  request <id> portal <start|stop|status>\n";
 
 static void console_write(const char *text)
 {
