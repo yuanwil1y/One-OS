@@ -17,3 +17,5 @@ nmap_l2 tests/host/run_nmap_l2_tests.sh
 wireshark_l2 tests/host/run_wireshark_l2_tests.sh
 app_diag_protocol tests/host/run_app_diag_protocol_tests.sh
 app_ops tests/host/run_app_ops_tests.sh
+app_scan tests/host/run_app_scan_tests.sh
+app_device tests/host/run_app_device_tests.sh

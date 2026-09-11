@@ -162,6 +162,17 @@ const ha_device_t *ha_core_device_get(const char *device_id);
 size_t ha_core_device_count(void);
 const ha_device_t *ha_core_device_at(size_t index);
 
+/*
+ * Remove a Device together with its Entities and their States.
+ *
+ * Needed by the application to sweep ephemeral observations once a later scan
+ * generation completes without seeing them. Returns HA_CORE_NOT_FOUND when the
+ * Device is unknown, so a caller cannot mistake "already gone" for success on
+ * the wrong id. Persistent, authorized identities must not be removed this way;
+ * that policy lives in the application.
+ */
+ha_core_status_t ha_core_device_remove(const char *device_id);
+
 ha_core_status_t ha_core_entity_upsert(const ha_entity_t *entity);
 const ha_entity_t *ha_core_entity_get(const char *entity_id);
 size_t ha_core_entity_count_for_device(const char *device_id);

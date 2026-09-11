@@ -97,23 +97,89 @@ PR #5 的 ZHA/zigpy 内容已通过 PR #12 纳入，旧 draft 已于 2026-09-11 
   新增组 `app_diag_protocol`（109 checks, 0 failures）与 `app_ops`（109 checks, 0 failures）。
 - build：ESP-IDF v6.1 / esp32c6 固件构建成功（约 4 分 20 秒）。
 
-### B0 能力现状
+### B0 能力现状（修正后的准确表述）
+
+B0 的"完成"只覆盖**构建与诊断骨架**，不代表任何真实后端被调用。此前把 B0 描述为
+"已完成"过于笼统，这里按三类分开说明：
+
+| 类别 | 状态 |
+|---|---|
+| 诊断骨架（入口、协议、操作门、worker、串口收发、资源报告字段） | 已实现并 host 测试通过 |
+| 真实后端调用（扫描、解析、识别、控制） | **B0 阶段全部为空实现**；B1—B3 已补齐 RF/LAN 与设备状态，见下节 |
+| 资源测量（真实 heap/栈余量数值） | **未测量**。字段已实现，但没有任何实板数值，不得引用构建日志推断 |
 
 - `tests/run_all_host_tests.sh` 是唯一入口，读取 `tests/host-test-groups.txt` 清单并调用
   各组原有 runner，不复制测试。CI 先 `--list` 再执行同一入口。
 - 串口入口支持 `ping/version/status/resources/scan/cancel/devices/entities/control`，
   响应含 request id、阶段、错误、partial/truncated 标志。
 - 资源报告含 free heap、min free heap、largest free block、worker/console 栈余量、
-  队列丢弃数、generation 与阶段进度；不含任何凭据。
-- **扫描阶段体尚未实现**：每个阶段记为 `skipped` 并返回 `not_implemented`，
-  `partial=1`。因此现在**不能**声称已经跑通“真实扫描→设备状态→串口输出”。
+  队列丢弃数、generation 与阶段进度；不含任何凭据。**字段存在 ≠ 已测量**。
 - `control` 返回 `not_implemented`，不伪装成控制成功。
 - Zigbee 修复已加回归测试：无回调 interview 超时收尾、`retries=255` 不回绕、
   失败 re-interview 保留 last-known-good。
 
-### 仍然阻塞
+## B1—B3 进展（2026-09-11）
 
-- **B1—B3 未开始**：原生栈生命周期与互斥、真实 Wi-Fi/BLE 扫描与解析、
-  联网后 mDNS/SSDP/Nmap、Device/Entity/State 去重与离线状态。
-- **实板验证全部待办**：本轮无实板，未烧录、未做射频互操作、未测量内存峰值。
+分支 `feat/b1-b3-headless-scan`。目标是无 GUI 的"真实 Wi-Fi/BLE 扫描→解析→应用设备状态→
+串口枚举"链路。
+
+### 关键资源事实（读代码确认，不是推测）
+
+- `kismet_wifi_session_start()` **自己调用 `esp_wifi_init()`**，且在
+  `esp_wifi_get_mode()` 成功（驱动已初始化）时返回 `ESP_ERR_INVALID_STATE`；
+  结束时执行 `esp_wifi_stop()` + `esp_wifi_deinit()`。
+  因此 STA 联网与被动扫描在**驱动层**互斥，不只是调度层互斥。
+- `kismet_ble_session_start()` **自己执行 `nvs_flash_init()` 与
+  `nimble_port_init()`..`nimble_port_deinit()`**，应用不得重复初始化 NimBLE。
+
+### 已实现
+
+| 交付 | 说明 |
+|---|---|
+| `app_wifi.{c,h}` | 唯一的 STA 生命周期拥有者；显式交接 release → 扫描 → restore；恢复失败如实报告，未配网是正常状态 |
+| `app_scan.{c,h}` | 无平台依赖的阶段策略与有界证据表（Wi-Fi/BLE+解析结果/LAN） |
+| `app_scan_native.c` | Kismet Wi-Fi 会话 + Wireshark 管理帧解析；Kismet BLE 会话 + Wireshark AD 解析；HA mDNS/SSDP；Nmap |
+| `app_device.{c,h}` | 应用绑定表；协议内命名空间身份、代次、离线/清除、只读约束 |
+| `kismet_wifi_tracker_get_device_ssid()` | 设备与 SSID 分表存放，应用无法仅凭设备表给 AP 命名 |
+| `ha_core_device_remove()` | 清除设备时一并移除其 Entity/State，避免孤立残留 |
+
+回调数据在**回调内部**复制进证据表，不保留会话指针；地址、地址类型、RSSI、信道、
+时间、截断与丢弃计数均保留。
+
+### 阶段实现状态（必须逐项如实报告）
+
+| 阶段 | 状态 |
+|---|---|
+| `wifi_rf` | **已接入真实后端** |
+| `ble_rf` | **已接入真实后端** |
+| `mdns` / `ssdp` | **已接入真实后端**，仅在获得 IPv4 时执行 |
+| `lan_hosts` | **已接入真实后端**（Nmap 主机发现） |
+| `lan_services` | **仍为空实现**，返回 `not_implemented`，记为 `skipped` |
+| `thread` / `zigbee` | **仍为空实现**，记为 `skipped` 并带明确原因 |
+| `enrichment` | **仍为空实现**（无 SD Device DB，无 profile 可依据） |
+| `materialize` | **已接入** `ha_core` |
+
+局部失败不会伪装成全协议完成：未接入的阶段一律 `skipped` + 原因，`partial=1`。
+
+### CI 证据（run `34612225371`，两者均 success）
+
+- host tests：**12 组全部通过，`failed groups: 0`**。
+  新增 `app_scan`（114 checks, 0 failures）与 `app_device`（118 checks, 0 failures）。
+- build：ESP-IDF v6.1 / esp32c6 构建成功。
+  `one_os.bin` = 0x1834F0（约 1.52 MB），app 分区 0x300000，剩余 0x17CB10（50%）。
+  **该数字来自 CI 构建日志，不是实板资源测量。**
+
+host 测试断言的是规则而非 mock 行为：未接入协议被判为 skipped 而不是 done；
+LAN 阶段需要 IP；同一串字节在 Wi-Fi 与 BLE 中保持为两个不同设备；未知设备保留且只读；
+未观测到的值不生成 Entity；重复物化不增长；十个代次的不同 AP 不累积；
+容量溢出被报告；恶意 SSID 无法注入控制字符；ha_core 拒绝插入时不留下孤儿绑定。
+
+### 仍然阻塞 / 未完成
+
+- **B4—B11 未开始**（Device DB、SD 读取与匹配、配网与 Web 管理、BLE GATT/ESPHome、
+  Zigbee 原生后端、OpenThread/Matter、统一控制与确认、整机验收）。
+- `lan_services`、`thread`、`zigbee`、`enrichment` 四个阶段仍为空实现。
+- **实板验证全部待办**：本轮无实板，未烧录、未做射频互操作、未测量内存峰值、
+  未验证串口真实输出与恢复行为。CI 通过只证明编译与 host 规则测试。
 - Matter 独立构建仍未修复（在 `research/matter-chip-tool-l2-api`）。
+

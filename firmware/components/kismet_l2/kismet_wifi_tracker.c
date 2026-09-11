@@ -578,6 +578,59 @@ esp_err_t kismet_wifi_tracker_get_relation(const kismet_wifi_tracker_t *tracker,
     return ESP_OK;
 }
 
+esp_err_t kismet_wifi_tracker_get_device_ssid(const kismet_wifi_tracker_t *tracker,
+                                              const uint8_t mac[6],
+                                              uint8_t *out_ssid,
+                                              size_t out_capacity,
+                                              uint8_t *out_len,
+                                              bool *out_hidden)
+{
+    uint16_t i;
+    int best_rank = -1;
+
+    if (tracker == NULL || mac == NULL || out_ssid == NULL || out_capacity == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (out_len != NULL) *out_len = 0u;
+    if (out_hidden != NULL) *out_hidden = false;
+
+    if (find_device(tracker, mac) < 0) return ESP_ERR_NOT_FOUND;
+
+    /*
+     * Prefer the strongest evidence for what this device calls itself:
+     * ADVERTISED (it is the AP) over RESPONDED (probe response) over PROBED
+     * (client looking for that name).
+     */
+    for (i = 0; i < tracker->config.max_ssid_links; ++i) {
+        const ssid_link_slot_t *link = &tracker->links[i];
+        int rank;
+        if (!link->used || !mac_equal(link->device, mac)) continue;
+        switch (link->kind) {
+        case KISMET_WIFI_SSID_ADVERTISED: rank = 3; break;
+        case KISMET_WIFI_SSID_RESPONDED:  rank = 2; break;
+        case KISMET_WIFI_SSID_PROBED:     rank = 1; break;
+        default:                          rank = 0; break;
+        }
+        if (rank <= best_rank) continue;
+
+        if (link->ssid_len == 0u) {
+            /* Hidden SSID: report it as such with no bytes. */
+            best_rank = rank;
+            if (out_len != NULL) *out_len = 0u;
+            if (out_hidden != NULL) *out_hidden = true;
+            continue;
+        }
+        if (link->ssid_len > out_capacity) continue;
+
+        memcpy(out_ssid, link->ssid, link->ssid_len);
+        if (out_len != NULL) *out_len = link->ssid_len;
+        if (out_hidden != NULL) *out_hidden = false;
+        best_rank = rank;
+    }
+
+    return best_rank < 0 ? ESP_ERR_NOT_FOUND : ESP_OK;
+}
+
 esp_err_t kismet_wifi_tracker_get_stats(const kismet_wifi_tracker_t *tracker,
                                         kismet_wifi_tracker_stats_t *out_stats)
 {
