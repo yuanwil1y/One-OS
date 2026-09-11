@@ -340,6 +340,291 @@ static void test_interview_cancel(void)
            st.status == ZIGPY_STATUS_CANCELLED);
 }
 
+/*
+ * Regression: an interview whose backend never calls back must not stay active
+ * forever. Previously zigpy_poll only handled commissioning and transaction
+ * deadlines, so a silent backend left the interview pending indefinitely and
+ * every later interview failed with ZIGPY_STATUS_BUSY.
+ */
+static void test_interview_phase_timeout_without_callback(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_device_ref_t dev = {.ieee = 1, .nwk = 0x1234};
+    zigpy_interview_config_t cfg = {.phase_timeout_ms = 1000,
+                                    .overall_timeout_ms = 10000};
+    uint32_t id = 0;
+    uint32_t second_id = 0;
+    zigpy_interview_status_t st;
+    zigpy_device_snapshot_t snap;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 0u, &id) == ZIGPY_STATUS_OK);
+    assert(b.node_req == 1);
+
+    /* Just before the deadline the interview is still legitimately waiting. */
+    zigpy_poll(&ctx, 999);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_NODE_DESC);
+
+    /* A second interview cannot start while one is genuinely in flight. */
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 999u, &second_id) ==
+           ZIGPY_STATUS_BUSY);
+
+    /* At the deadline the component must close the interview out. */
+    zigpy_poll(&ctx, 1000);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_FAILED);
+    assert(st.status == ZIGPY_STATUS_TIMEOUT);
+    /* The silent backend was told to cancel, and no device data was invented. */
+    assert(b.cancel_req == 1);
+    assert(zigpy_interview_get_snapshot(&ctx, &snap) == ZIGPY_STATUS_TIMEOUT);
+    assert(snap.complete_mask == 0u);
+    assert(snap.endpoint_count == 0u);
+
+    /* Deadlines are cleared once the interview is terminal. */
+    assert(st.phase_deadline_ms == 0u && st.overall_deadline_ms == 0u);
+
+    /* Crucially, the next interview is no longer blocked. */
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 2000u, &second_id) ==
+           ZIGPY_STATUS_OK);
+    assert(second_id != id);
+    assert(b.node_req == 2);
+    assert(zigpy_interview_cancel(&ctx, second_id) == ZIGPY_STATUS_OK);
+}
+
+/*
+ * Regression: a backend that answers the first step and then goes silent must
+ * end as PARTIAL (usable evidence retained) rather than hanging, and the
+ * evidence collected before the timeout must survive.
+ */
+static void test_interview_partial_timeout_keeps_evidence(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_device_ref_t dev = {.ieee = 0xABCD, .nwk = 0x1234};
+    zigpy_node_descriptor_t node = {.logical_type = 2, .manufacturer_code = 0x117C};
+    zigpy_interview_config_t cfg = {.phase_timeout_ms = 500,
+                                    .overall_timeout_ms = 4000};
+    uint32_t id = 0;
+    zigpy_interview_status_t st;
+    zigpy_device_snapshot_t snap;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 0u, &id) == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_node_desc_complete(&ctx, id, ZIGPY_STATUS_OK, &node) ==
+           ZIGPY_STATUS_OK);
+
+    /* Phase advanced to ACTIVE_EP; the deadline refreshes for the new phase. */
+    zigpy_poll(&ctx, 1000);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_ACTIVE_EP);
+
+    zigpy_poll(&ctx, 1500);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_DONE);
+    assert(st.status == ZIGPY_STATUS_PARTIAL);
+    assert((st.complete_mask & ZIGPY_INTERVIEW_COMPLETE_NODE_DESC) != 0u);
+
+    /* The node descriptor gathered before the timeout is still readable. */
+    assert(zigpy_interview_get_snapshot(&ctx, &snap) == ZIGPY_STATUS_PARTIAL);
+    assert((snap.complete_mask & ZIGPY_INTERVIEW_COMPLETE_NODE_DESC) != 0u);
+    assert(snap.node_descriptor.manufacturer_code == 0x117C);
+}
+
+/*
+ * Regression: the overall deadline must bound a slow interview even when each
+ * phase keeps arriving just in time.
+ */
+static void test_interview_overall_deadline(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_device_ref_t dev = {.ieee = 1, .nwk = 0x1234};
+    zigpy_node_descriptor_t node = {0};
+    zigpy_interview_config_t cfg = {.phase_timeout_ms = 1000,
+                                    .overall_timeout_ms = 2500};
+    uint32_t id = 0;
+    zigpy_interview_status_t st;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 0u, &id) == ZIGPY_STATUS_OK);
+    /* Answer at t=900: inside the phase deadline, and refresh the phase. */
+    assert(zigpy_interview_node_desc_complete(&ctx, id, ZIGPY_STATUS_OK, &node) ==
+           ZIGPY_STATUS_OK);
+    zigpy_poll(&ctx, 900);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_ACTIVE_EP);
+
+    /* A per-phase answer at t=1800 is still "in time" for that phase, but the
+     * overall interview budget is nearly gone. */
+    zigpy_poll(&ctx, 1800);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_ACTIVE_EP);
+
+    /* Past the overall deadline the interview must terminate regardless. */
+    zigpy_poll(&ctx, 2500);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_DONE);
+    assert(st.status == ZIGPY_STATUS_PARTIAL);
+}
+
+/*
+ * Regression: retries == 255 used to make the uint8_t attempt counter wrap, so
+ * the retry condition stayed true and the transaction retried forever.
+ */
+static void test_retry_limit_does_not_wrap(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_attr_path_t attr = {
+        .device = {.ieee = 1, .nwk = 0x1234},
+        .endpoint_id = 1,
+        .cluster_id = 0x0006,
+        .attribute_id = 0x0000,
+    };
+    zigpy_transaction_result_t result;
+    uint32_t id;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+
+    /* Ask for the maximum representable retry count. */
+    assert(zigpy_attr_read_async(&ctx, &attr, 100, 255, 0, &id) == ZIGPY_STATUS_OK);
+    assert(b.read_req == 1);
+
+    /* The stored limit must be clamped into the reachable range. */
+    assert(zigpy_transaction_get_result(&ctx, id, &result) == ZIGPY_STATUS_OK);
+    assert(result.attempts == 1u);
+    {
+        /*
+         * The initial attempt was already sent. Each further poll that finds
+         * the deadline passed consumes one retry, so the transaction must
+         * finish after exactly ZIGPY_MAX_RETRIES more timeouts. The bound is
+         * what matters: with the wrap-around bug this loop never terminated
+         * because the condition `attempts <= max_retries` stayed true forever.
+         */
+        uint32_t now = 0u;
+        unsigned retry_polls = 0u;
+        unsigned guard = 0u;
+        for (;;) {
+            assert(guard++ < 1000u); /* fails loudly instead of hanging */
+            now += 200u;             /* always past the 100 ms deadline */
+            zigpy_poll(&ctx, now);
+            assert(zigpy_transaction_get_result(&ctx, id, &result) ==
+                   ZIGPY_STATUS_OK);
+            if (result.state != ZIGPY_TX_PENDING) {
+                break;
+            }
+            ++retry_polls;
+        }
+        assert(result.state == ZIGPY_TX_COMPLETE);
+        assert(result.status == ZIGPY_STATUS_TIMEOUT);
+        /* Exactly the clamped retry budget was consumed, and no more. */
+        assert(retry_polls == ZIGPY_MAX_RETRIES);
+        assert(result.attempts == (uint8_t)(ZIGPY_MAX_RETRIES + 1u));
+        assert(b.read_req == (unsigned)ZIGPY_MAX_RETRIES + 1u);
+    }
+
+    assert(zigpy_transaction_release(&ctx, id) == ZIGPY_STATUS_OK);
+}
+
+/* A bounded retry count must still work exactly as before. */
+static void test_retry_limit_bounded_case_unchanged(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_attr_path_t attr = {
+        .device = {.ieee = 1, .nwk = 0x1234},
+        .endpoint_id = 1,
+        .cluster_id = 0x0006,
+        .attribute_id = 0x0000,
+    };
+    zigpy_transaction_result_t result;
+    uint32_t id;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+    assert(zigpy_attr_read_async(&ctx, &attr, 100, 2, 0, &id) == ZIGPY_STATUS_OK);
+    assert(b.read_req == 1);
+
+    zigpy_poll(&ctx, 100);
+    assert(b.read_req == 2);
+    zigpy_poll(&ctx, 200);
+    assert(b.read_req == 3);
+    /* Attempts exhausted: the fourth poll must report a timeout, not retry. */
+    zigpy_poll(&ctx, 300);
+    assert(b.read_req == 3);
+    assert(zigpy_transaction_get_result(&ctx, id, &result) == ZIGPY_STATUS_OK);
+    assert(result.state == ZIGPY_TX_COMPLETE);
+    assert(result.status == ZIGPY_STATUS_TIMEOUT);
+    assert(result.attempts == 3u);
+}
+
+/*
+ * Regression: starting a re-interview used to wipe the snapshot immediately, so
+ * a failed re-interview destroyed already-known device information.
+ */
+static void test_last_good_snapshot_survives_failed_reinterview(void)
+{
+    zigpy_ctx_t ctx;
+    fake_backend_t b = {0};
+    zigpy_backend_ops_t ops = fake_ops();
+    zigpy_device_ref_t dev = {.ieee = 0x00124B0001ABCDEFULL, .nwk = 0x1234};
+    zigpy_node_descriptor_t node = {.logical_type = 2, .manufacturer_code = 0x117C};
+    uint8_t eps[] = {1};
+    uint16_t ep_in[] = {0x0000, 0x0006};
+    zigpy_interview_config_t cfg = {.phase_timeout_ms = 500,
+                                    .overall_timeout_ms = 2000};
+    uint32_t id = 0;
+    uint32_t second = 0;
+    zigpy_interview_status_t st;
+    zigpy_device_snapshot_t good;
+
+    assert(zigpy_init(&ctx, &ops, &b) == ZIGPY_STATUS_OK);
+
+    /* Before any successful interview there is no known-good data. */
+    assert(zigpy_interview_get_last_good_snapshot(&ctx, &good) ==
+           ZIGPY_STATUS_NOT_FOUND);
+
+    /* Complete one full interview. */
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 0u, &id) == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_node_desc_complete(&ctx, id, ZIGPY_STATUS_OK, &node) ==
+           ZIGPY_STATUS_OK);
+    assert(zigpy_interview_active_ep_complete(&ctx, id, ZIGPY_STATUS_OK, eps, 1) ==
+           ZIGPY_STATUS_OK);
+    assert(zigpy_interview_simple_desc_complete(&ctx, id, 1, ZIGPY_STATUS_OK,
+                                                0x0104, 0x0402, ep_in, 2, NULL, 0) ==
+           ZIGPY_STATUS_OK);
+    assert(zigpy_interview_basic_identity_complete(&ctx, id, ZIGPY_STATUS_OK,
+                                                   "IKEA of Sweden",
+                                                   "VALLHORN") == ZIGPY_STATUS_OK);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_DONE && st.status == ZIGPY_STATUS_OK);
+
+    assert(zigpy_interview_get_last_good_snapshot(&ctx, &good) == ZIGPY_STATUS_OK);
+    assert(good.endpoint_count == 1u);
+    assert(strcmp(good.manufacturer, "IKEA of Sweden") == 0);
+    assert(strcmp(good.model, "VALLHORN") == 0);
+
+    /* Now start a re-interview that times out with no callbacks at all. */
+    assert(zigpy_interview_begin_ex(&ctx, &dev, &cfg, 10000u, &second) ==
+           ZIGPY_STATUS_OK);
+    zigpy_poll(&ctx, 50000u);
+    assert(zigpy_interview_get_status(&ctx, &st) == ZIGPY_STATUS_OK);
+    assert(st.phase == ZIGPY_INTERVIEW_FAILED);
+
+    /* The current snapshot is empty, but the known-good one is recoverable. */
+    assert(zigpy_interview_get_last_good_snapshot(&ctx, &good) == ZIGPY_STATUS_OK);
+    assert(good.endpoint_count == 1u);
+    assert(strcmp(good.manufacturer, "IKEA of Sweden") == 0);
+    assert(strcmp(good.model, "VALLHORN") == 0);
+    assert((good.complete_mask & ZIGPY_INTERVIEW_COMPLETE_IDENTITY) != 0u);
+}
+
 int main(void)
 {
     test_commissioning();
@@ -347,6 +632,12 @@ int main(void)
     test_identity_fallback_and_partial();
     test_transactions();
     test_interview_cancel();
+    test_interview_phase_timeout_without_callback();
+    test_interview_partial_timeout_keeps_evidence();
+    test_interview_overall_deadline();
+    test_retry_limit_does_not_wrap();
+    test_retry_limit_bounded_case_unchanged();
+    test_last_good_snapshot_survives_failed_reinterview();
     puts("zigpy_l2 host tests passed");
     return 0;
 }
