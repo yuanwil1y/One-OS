@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "app_device.h"
+#include "app_db_import.h"
 #include "app_device_db.h"
 #include "app_device_db_sd.h"
 #include "app_http_portal.h"
@@ -362,13 +363,21 @@ static uint32_t portal_now_ms(void *ctx)
     return now_ms();
 }
 
-static void portal_sta_release(void *ctx)
+/*
+ * Hand the radio to the portal's access point.
+ *
+ * The session calls this and checks the result, so a release that fails must be reported
+ * rather than swallowed: starting an AP on a driver the station still owns is exactly the
+ * state the session's rollback exists to prevent, and it cannot roll back something it was
+ * told succeeded.
+ */
+static esp_err_t portal_sta_release(void *ctx)
 {
     bool was_started = false;
     bool was_connected = false;
 
     (void)ctx;
-    (void)wifi_mgr_release_for_scan(&was_started, &was_connected);
+    return wifi_mgr_release_for_scan(&was_started, &was_connected);
 }
 
 static esp_err_t portal_sta_restore(void *ctx)
