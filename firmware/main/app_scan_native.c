@@ -426,7 +426,6 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
      * mutated from that task's callbacks. `stopped` records whether we actually
      * observed completion.
      */
-    bool stopped = false;
     err = kismet_wifi_session_wait(session, cfg.wifi_duration_ms + 3000u);
     if (err == ESP_OK) {
         stopped = true;
