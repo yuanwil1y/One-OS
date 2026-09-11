@@ -207,10 +207,14 @@ cd D:\OS\One-OS
 
 ### CI
 
-- 本 PR 分支的构建与 host 测试由 `.github/workflows/build.yml` 在 push 时执行；
-  精确 run 号与结论见 PR #20 页面（本文件不预填未核实的 run 号）。
-- 参考：`34631896042`（B5 首个提交）中 `build` 成功、`host-tests` 因
-  `run_app_device_tests.sh` 未链接 `app_l2_lookup_stub.c` 失败；该问题已在 `e081725` 修复。
+- **main `74facd3`（PR #20 合并提交）：`build` 与 `host-tests` 均 success**
+  —— [run 34635862479](https://github.com/yuanwil1y/One-OS/actions/runs/34635862479)。
+  这是 B5 完成的构建证据。
+- B6 分支 `feat/b6-http-portal` **不触发 CI**（workflow 只在 push 到 main 与 PR 事件时运行），
+  所以该分支上的改动目前**只有本机 host 测试证据**。本轮在其中加入的 `wifi_mgr_ap_*`
+  是本机完全无法编译的 ESP-IDF 代码，必须等它进入 PR 或 main 才能拿到目标构建证据。
+- 历史：`34634665402`（B5 分支最后一轮）success；`34634041141`、`34632937479` 失败，
+  原因分别是 `stopped` 重复定义与 `stopped` 未初始化，均已在 `0acda78` 修复。
 
 ### 目标构建（本机无法执行）
 
