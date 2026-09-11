@@ -340,6 +340,15 @@ function Invoke-Group {
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
                 "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
         }
+        'app_ble_gatt' {
+            # Platform independent: the GATT operations arrive through a vtable,
+            # so the session lifecycle is driven by a scripted backend here.
+            Build-And-Run 'app_ble_gatt' @(
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $Root 'tests\host\test_app_ble_gatt.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
+        }
         'app_acceptance' {
             Build-And-Run 'app_acceptance' @(
                 (Join-Path $hc 'ha_core.c'),

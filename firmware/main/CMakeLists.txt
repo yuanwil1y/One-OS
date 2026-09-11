@@ -13,6 +13,7 @@ idf_component_register(
         "app_portal.c"
         "app_provision.c"
         "app_control.c"
+        "app_ble_gatt.c"
         "app_http_portal.c"
         "app_portal_native.c"
         "app_device.c"
