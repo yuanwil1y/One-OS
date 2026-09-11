@@ -345,9 +345,40 @@ static device_slot_t *device_upsert(const char *device_id,
     device_slot_t *slot = device_slot_find(device_id);
     ha_device_t device;
     ha_core_status_t status;
+    bool insert_truncated = false;
 
     if (out_created != NULL) {
         *out_created = false;
+    }
+
+    /* ha_core is authoritative. Build and insert there FIRST: claiming an
+     * application binding before a successful insert would leave a binding with
+     * no matching ha_core Device whenever the insert is rejected (capacity or an
+     * identity conflict), which the enumeration would then report as a device
+     * that does not exist. */
+    memset(&device, 0, sizeof(device));
+    (void)app_strlcpy(device.id, ha_device_id, sizeof(device.id));
+    (void)app_strlcpy(device.name, name, sizeof(device.name));
+    (void)app_strlcpy(device.manufacturer, manufacturer, sizeof(device.manufacturer));
+    (void)app_strlcpy(device.model, model, sizeof(device.model));
+    (void)app_strlcpy(device.model_id, protocol_label, sizeof(device.model_id));
+
+    if (identifier != NULL) {
+        device.identifiers[0] = *identifier;
+        device.identifier_count = 1u;
+    }
+    if (connection != NULL) {
+        device.connections[0] = *connection;
+        device.connection_count = 1u;
+    }
+
+    status = ha_core_device_upsert(&device);
+    if (status != HA_CORE_OK) {
+        /* Capacity or conflict: report truncation and do not create a binding. */
+        if (out_truncated != NULL) {
+            *out_truncated = true;
+        }
+        return NULL;
     }
 
     if (slot == NULL) {
@@ -406,28 +437,6 @@ static device_slot_t *device_upsert(const char *device_id,
         slot->value.first_seen_ms = seen_ms;
     }
 
-    memset(&device, 0, sizeof(device));
-    (void)app_strlcpy(device.id, ha_device_id, sizeof(device.id));
-    (void)app_strlcpy(device.name, name, sizeof(device.name));
-    (void)app_strlcpy(device.manufacturer, manufacturer, sizeof(device.manufacturer));
-    (void)app_strlcpy(device.model, model, sizeof(device.model));
-    (void)app_strlcpy(device.model_id, protocol_label, sizeof(device.model_id));
-
-    if (identifier != NULL) {
-        device.identifiers[0] = *identifier;
-        device.identifier_count = 1u;
-    }
-    if (connection != NULL) {
-        device.connections[0] = *connection;
-        device.connection_count = 1u;
-    }
-
-    status = ha_core_device_upsert(&device);
-    if (status == HA_CORE_CAPACITY || status == HA_CORE_CONFLICT) {
-        if (out_truncated != NULL) {
-            *out_truncated = true;
-        }
-    }
     return slot;
 }
 
