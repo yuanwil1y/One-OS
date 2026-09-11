@@ -1,0 +1,43 @@
+# Normalize line endings for a cross-platform firmware repository.
+#
+# CI runs host test runners as `sh`/`bash` scripts on Linux, and the ESP-IDF
+# build reads CMake/source files there too. A CRLF checkout would break the
+# shebang interpreters, so text files are stored and checked out as LF.
+#
+# Windows contributors keep LF in the working tree for these paths. That is
+# deliberate: it makes a local run byte-identical to CI.
+
+* text=auto eol=lf
+
+# Shell scripts and CI definitions must never be converted.
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Build and source files the ESP-IDF toolchain reads.
+*.c             text eol=lf
+*.h             text eol=lf
+*.cpp           text eol=lf
+*.hpp           text eol=lf
+*.txt           text eol=lf
+CMakeLists.txt  text eol=lf
+*.cmake         text eol=lf
+*.csv           text eol=lf
+*.py            text eol=lf
+*.md            text eol=lf
+*.tsv           text eol=lf
+
+# Binary artefacts must never be normalized.
+*.bin           binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.zip           binary
+*.nbdb          binary
+*.part          binary
+
+# Host test build outputs.
+tests/host/wireshark_l2/test_wireshark_l2  binary
