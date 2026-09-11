@@ -774,7 +774,6 @@ static void test_aead(void)
 
     /* block boundaries: 32-byte key = 00..1f, nonce = f0..fb */
     {
-        uint8_t ad[32];
         static const char *key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         static const char *nonce_hex = "f0f1f2f3f4f5f6f7f8f9fafb";
         static const char *ad16 = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf";
@@ -817,7 +816,6 @@ static void test_aead(void)
 
         /* zero key and nonce with 32-byte pt and aad */
         for (i = 0u; i < 32u; i++) {
-            ad[i] = (uint8_t)i;
             pt[i] = (uint8_t)(i ^ 0x5au);
         }
         aead_case("aead 32-byte pt + 32-byte aad with all-zero key/nonce",
