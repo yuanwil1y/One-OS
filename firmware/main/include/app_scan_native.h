@@ -86,6 +86,18 @@ esp_err_t app_scan_native_ssdp(app_scan_evidence_t *ev,
 esp_err_t app_scan_native_lan_hosts(app_scan_evidence_t *ev,
                                     const app_scan_native_config_t *config,
                                     app_scan_native_stats_t *stats);
+
+/*
+ * Service identification on hosts the host-discovery stage already found.
+ *
+ * This is the only stage that opens TCP connections to other devices, so its
+ * scope is deliberately narrow and fixed: only already-observed "up" hosts, only
+ * a short well-known port list, passive probes only (never a write, never a
+ * credential attempt), one shared deadline across the port and service halves,
+ * and cancellation checked between them.
+ *
+ * Returns ESP_OK when there was nothing to probe; that is not a failure.
+ */
 esp_err_t app_scan_native_lan_services(app_scan_evidence_t *ev,
                                        const app_scan_native_config_t *config,
                                        app_scan_native_stats_t *stats);
