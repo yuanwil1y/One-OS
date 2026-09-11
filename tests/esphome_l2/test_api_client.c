@@ -92,6 +92,10 @@ assert(esphome_api_subscribe(&s,scb,NULL)==ESP_OK);
 assert(esphome_api_poll(&s,1000)==ESP_OK&&got_state==1);
 esphome_api_command_t ncmd={.kind=ESPHOME_API_COMMAND_SWITCH,.key=0x11111111,.value.switch_.state=false};
 assert(esphome_api_command(&s,&ncmd)==ESP_OK);
+/* Sending the command changed nothing on its own: the observed state moves only
+ * when the peer reports it, which is what this poll receives. */
+assert(got_off==0);
+assert(esphome_api_poll(&s,1000)==ESP_OK&&got_off==1);
 assert(esphome_api_last_protocol_error(&s)==ESPHOME_API_PROTOCOL_ERROR_NONE);
 assert(esphome_api_close(&s)==ESP_OK&&!esphome_api_is_connected(&s));
 esphome_api_deinit(&s);pthread_join(th,NULL);close(a.listen_fd);
@@ -99,8 +103,7 @@ esphome_api_deinit(&s);pthread_join(th,NULL);close(a.listen_fd);
  * command message type and the requested key. */
 assert(g_cmd_type==33&&g_cmd_len>=4);
 assert(g_cmd_payload[0]==0x11&&g_cmd_payload[1]==0x11&&g_cmd_payload[2]==0x11&&g_cmd_payload[3]==0x11);
-/* Observed state moved only because the peer reported it. */
-assert(got_state==1&&got_off==0);}
+assert(got_state==1&&got_off==1);}
 /* Wrong PSK: the peer rejects the handshake and the client reports an
  * authentication failure instead of proceeding on an unauthenticated link. */
 {uint8_t psk[32];for(unsigned i=0;i<32;i++)psk[i]=(uint8_t)(0xa0u+i);memcpy(g_psk,psk,32);
