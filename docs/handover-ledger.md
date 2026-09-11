@@ -21,20 +21,28 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `https://github.com/yuanwil1y/One-OS` |
-| 工作分支 | `feat/b5-recognition` |
-| PR | [#20](https://github.com/yuanwil1y/One-OS/pull/20)（B5） |
-| 基线 main | `478e83f` |
+| 当前分支 | `feat/b6-http-portal`（B6 剩余工作） |
+| 已合并 | PR [#20](https://github.com/yuanwil1y/One-OS/pull/20) **已 merged**（merge commit `74facd3`）：B5 与 B6 前半部分进入 main |
+| main | `74facd3` |
 | 目标硬件 | Waveshare ESP32-C6-Touch-LCD-1.9，ESP-IDF v6.1，无 PSRAM，8 MB flash |
 
-### 远端分支情况（与旧汇报的差异）
+### 远端分支情况（实测，非文档推断）
 
-开发状态文档里"远端仅剩 `main` 与 `research/matter-chip-tool-l2-api`"的说法**已经过期**。
-实测 `git branch -a` 后远端存在：`main`、`feat/b5-recognition`，以及若干
-`research/*`（esphome、home-assistant-wireless、kismet、nmap、openthread、theengs、
-wireshark、zha-zigpy、matter-chip-tool）、`integration/l2-runtime`、
-`cleanup/*`、`beta/smoke-v0.1.0-beta.2`、`tmp/*` 等。清理脚本
-（`tools/cleanup_remote_branches.py`）记录的候选已不存在，但这些分支**没有被删掉**，
-因此旧汇报不成立。本轮不重启清理工作；B11 之前需要重新审计并更新文档。
+`git ls-remote --heads origin` 的实际结果：只有 `main` 与 `research/matter-chip-tool-l2-api`。
+B5 的工作分支 `feat/b5-recognition` 在 PR #20 合并后**已删除**（合并提交
+`74facd3` 保留了全部历史，工作树无本地独有提交）。
+
+**这里有一个本轮犯过并已纠正的错误**：本文件的第一版曾写"远端存在
+`research/esphome`、`integration/l2-runtime`、`cleanup/*`、`tmp/*` 等多个分支"，
+依据是 `git branch -a` 的输出——而那个列表里包含的是**本地缓存的陈旧远端引用**，
+不是远端实际状态。用 `git ls-remote` 复核后，远端只有 main、Matter 研究分支和
+B5 自己的分支。
+
+所以开发状态文档里"远端仅剩 `main` 与 `research/matter-chip-tool-l2-api`"的记载
+一直是**正确**的。之前把它判为"过期文档"是错的，本文件已改正。
+
+教训：判断远端状态用 `git ls-remote`（或 `git fetch --prune` 之后的 `git branch -r`），
+不要直接用 `git branch -a`——后者在没有 prune 的情况下会保留已删除分支的引用。
 
 ## 2. 本地环境（本机没有任何 C 工具链，默认状态）
 
