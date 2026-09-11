@@ -1101,9 +1101,9 @@ static void test_enrichment_fills_the_table_and_materialisation_applies_it(void)
     CHECK(entry != NULL, "the LAN observation has an entry");
     if (entry != NULL) {
         CHECK(entry->attempted, "recognition was attempted for it");
-        CHECK(entry->result.matched, "the printer profile matched");
-        CHECK(entry->result.profile_id == 1005u, "profile 1005, got %lu",
-              (unsigned long)entry->result.profile_id);
+        CHECK(entry->matched, "the printer profile matched");
+        CHECK(entry->profile_id == 1005u, "profile 1005, got %lu",
+              (unsigned long)entry->profile_id);
     }
 
     (void)app_device_identity_of_wifi(&wifi, identity, sizeof(identity));
@@ -1111,7 +1111,7 @@ static void test_enrichment_fills_the_table_and_materialisation_applies_it(void)
     CHECK(entry != NULL, "the Wi-Fi observation has an entry");
     if (entry != NULL) {
         CHECK(entry->attempted, "recognition was attempted for the AP too");
-        CHECK(!entry->result.matched && !entry->result.ambiguous,
+        CHECK(!entry->matched && !entry->ambiguous,
               "an unknown AP is NOT_FOUND");
     }
 

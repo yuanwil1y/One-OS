@@ -690,6 +690,19 @@ static app_diag_error_t run_scan_stage(app_scan_stage_t stage,
         (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
         return APP_DIAG_ERR_UNSUPPORTED;
     }
+    if (err == ESP_ERR_NOT_FINISHED) {
+        /*
+         * The radio is still owned by a previous session whose teardown timed out.
+         *
+         * FAILED, not SKIPPED: this is not "the protocol is not wired up", it is
+         * "this scan could not use the radio at all". Reporting it as skipped would
+         * present a scan that saw nothing as a normal, complete outcome.
+         */
+        ESP_LOGE(TAG, "scan stage %s failed: the radio is held by a previous session",
+                 app_scan_stage_name(stage));
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_FAILED);
+        return APP_DIAG_ERR_INTERNAL;
+    }
 
     ESP_LOGW(TAG, "scan stage %s failed: %s", app_scan_stage_name(stage),
              esp_err_to_name(err));

@@ -61,9 +61,33 @@ typedef enum {
 typedef enum {
     APP_AVAILABILITY_UNKNOWN = 0,
     APP_AVAILABILITY_ONLINE,
+    /*
+     * Not observed in a generation whose coverage was COMPLETE for every protocol
+     * that has seen this device. Absence is therefore real evidence, but not yet
+     * proof: one missed RF report is not a departure, so the device is kept and
+     * marked, and removal needs a second consecutive miss.
+     *
+     * The entity set is retained: a stale device's identity, recognition and
+     * entities are its identity, and dropping them would lose exactly the
+     * information a returning device needs.
+     */
     APP_AVAILABILITY_STALE,
+    /*
+     * Not observed, and absence is NOT evidence: at least one protocol that has
+     * seen this device was skipped, failed, cancelled or only partially covered
+     * this generation. "We could not look" is a weaker statement than "we looked
+     * and it was gone", and the two are reported differently on purpose.
+     *
+     * A persistent (authorized) identity is always at least this state and is
+     * never swept, so a commissioning it once held is not lost to an outage.
+     */
     APP_AVAILABILITY_UNAVAILABLE,
 } app_availability_t;
+
+/* How many consecutive fully-covered generations a missing ephemeral device is
+ * kept before it is removed. Two means one unexpected RF report cannot delete a
+ * device that is physically present. */
+#define APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT 2u
 
 typedef struct {
     char device_id[HA_CORE_ID_LEN];
@@ -71,6 +95,21 @@ typedef struct {
     uint32_t sources;
     app_recognition_state_t recognition;
     app_availability_t availability;
+    /*
+     * Per-source freshness for the current generation.
+     *
+     * A device can be observed by Wi-Fi and BLE; if BLE reports it and Wi-Fi does
+     * not, the device is still online and only the BLE side is fresh. Collapsing
+     * this into one flag would let one source's silence hide another source's
+     * evidence, so the table keeps a flag per source and the generation logic
+     * reads them individually.
+     */
+    bool seen_wifi;
+    bool seen_ble;
+    bool seen_lan;
+    /* Consecutive fully-covered generations in which this device was not seen by
+     * any source. Reset to zero by any sighting. */
+    uint8_t miss_rounds;
     bool ephemeral;              /* observation-derived, may be swept */
     bool read_only;              /* no writable Entity may be attached */
     uint32_t first_generation;
@@ -182,6 +221,13 @@ uint32_t app_device_swept_count(void);
  * Entries are keyed by the same identity the device table uses (protocol +
  * observation bytes), so a lookup cannot cross protocols: the same bytes in
  * Wi-Fi and BLE stay two devices with two independent results.
+ *
+ * MEMORY: an entry stores only what materialisation reads - the profile metadata
+ * and the compact recipes the matcher actually accepted. The full
+ * app_recognition_result_t, including its per-recipe sub-records, belongs to the
+ * matching call and is not retained; retaining it would make this table roughly
+ * ten times larger than the device table it feeds. See
+ * docs/recognition-budget.md for the measured numbers.
  */
 #define APP_RECOGNITION_TABLE_MAX APP_DEVICE_MAX
 
@@ -193,9 +239,22 @@ typedef enum {
 typedef struct {
     app_recognition_entry_state_t state;
     uint32_t sources;
+    app_db_state_t db_state;         /* the database state when this was decided */
     char identity[HA_CORE_ID_LEN];   /* the same key the device table builds */
-    bool attempted;                  /* false: recognition could not run at all */
-    app_recognition_result_t result;
+    /* false: recognition could not run at all, which is NOT "nothing matched". */
+    bool attempted;
+    bool matched;
+    bool ambiguous;
+    uint32_t profile_id;
+    char display_name[APP_RECOGNITION_MAX_LABEL];
+    char vendor[APP_RECOGNITION_MAX_LABEL];
+    char model[APP_RECOGNITION_MAX_LABEL];
+    uint32_t theengs_decoder_id;
+    uint32_t zha_quirk_id;
+    bool backend_supported;
+    const char *backend_name;
+    uint8_t recipe_count;
+    app_entity_recipe_t recipes[APP_RECOGNITION_MAX_RECIPES];
 } app_recognition_entry_t;
 
 typedef struct {

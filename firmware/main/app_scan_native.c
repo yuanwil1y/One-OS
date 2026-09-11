@@ -56,6 +56,122 @@ bool app_scan_native_cancel_requested(void)
     return s_cancel;
 }
 
+/*
+ * A session whose teardown timed out.
+ *
+ * destroy_checked() deliberately does not free a session whose task refused to
+ * exit, because that task still dereferences it - and, more importantly on this
+ * board, because that task still owns the radio: the Kismet Wi-Fi session calls
+ * esp_wifi_stop()/esp_wifi_deinit() in its own cleanup, and the BLE session owns
+ * nvs_flash and the NimBLE host. So a timed-out session is not just a leak, it is
+ * a live owner of hardware the application must not touch.
+ *
+ * Holding the handle here is what turns "leaked" into "recoverable":
+ *
+ *   - the radio stays IN QUARANTINE while the task is alive. `wifi_rf` refuses to
+ *     start, so the application never calls esp_wifi_init() underneath a task that
+ *     is about to call esp_wifi_deinit(), which is the one ordering that could
+ *     tear down a driver another session just brought up;
+ *   - release_quarantined_sessions() retries the destroy as soon as the task has
+ *     finished, so the session and its queue, semaphores and tracker are reclaimed
+ *     rather than accumulating one per failed teardown;
+ *   - the stage that hit it is FAILED with unusable evidence, so a scan is never
+ *     reported as complete on data from a session that could not be stopped.
+ *
+ * At most one Wi-Fi and one BLE session can be quarantined at a time, because a
+ * second session of the same family cannot start while the first is alive. The
+ * count is therefore bounded by construction, not by a retry budget.
+ */
+typedef struct {
+    kismet_wifi_session_t *wifi;
+    kismet_ble_session_t *ble;
+} quarantined_sessions_t;
+
+static quarantined_sessions_t s_quarantine;
+/* The BLE tracker a quarantined BLE session still writes into. Held for exactly
+ * as long as that session, never freed while its task can still call back. */
+static kismet_ble_tracker_t *s_ble_tracker_in_quarantine;
+
+/* Set true when a session had to be quarantined and is still alive. */
+static app_scan_rf_quarantine_t s_wifi_quarantine_state;
+static app_scan_rf_quarantine_t s_ble_quarantine_state;
+
+const char *app_scan_rf_quarantine_name(app_scan_rf_quarantine_t state)
+{
+    switch (state) {
+    case APP_SCAN_RF_QUARANTINE_NONE:      return "none";
+    case APP_SCAN_RF_QUARANTINE_HELD:      return "held";
+    case APP_SCAN_RF_QUARANTINE_RECLAIMED: return "reclaimed";
+    default:                               return "invalid";
+    }
+}
+
+app_scan_rf_quarantine_t app_scan_native_wifi_quarantine(void)
+{
+    return s_wifi_quarantine_state;
+}
+
+app_scan_rf_quarantine_t app_scan_native_ble_quarantine(void)
+{
+    return s_ble_quarantine_state;
+}
+
+/*
+ * Reclaim everything a previous failed teardown left behind.
+ *
+ * Called at the start of every RF stage, before anything else. Returns the number
+ * of sessions still alive afterwards: a non-zero result means the radio is still
+ * owned by a task that refused to exit, and the stage must not start.
+ */
+static size_t release_quarantined_sessions(void)
+{
+    size_t alive = 0u;
+
+    if (s_quarantine.wifi != NULL) {
+        if (kismet_wifi_session_task_alive(s_quarantine.wifi)) {
+            alive++;
+        } else if (kismet_wifi_session_destroy_checked(s_quarantine.wifi) == ESP_OK) {
+            ESP_LOGW(TAG, "a quarantined wifi session finally exited and was reclaimed");
+            s_quarantine.wifi = NULL;
+            s_wifi_quarantine_state = APP_SCAN_RF_QUARANTINE_RECLAIMED;
+            /*
+             * The driver has been handed back by the task that owned it, so the
+             * STA owner may take it again. Reconnecting here rather than at the
+             * end of the failed scan is what keeps the network outage limited to
+             * the time the task actually took.
+             */
+            (void)wifi_mgr_release_quarantine();
+        } else {
+            /* Still not destroyable. Treated exactly like "still alive": the radio
+             * is not ours to take. */
+            alive++;
+        }
+    }
+
+    if (s_quarantine.ble != NULL) {
+        if (kismet_ble_session_task_alive(s_quarantine.ble)) {
+            alive++;
+        } else if (kismet_ble_session_destroy_checked(s_quarantine.ble) == ESP_OK) {
+            ESP_LOGW(TAG, "a quarantined ble session finally exited and was reclaimed");
+            s_quarantine.ble = NULL;
+            s_ble_quarantine_state = APP_SCAN_RF_QUARANTINE_RECLAIMED;
+            /* The task can no longer write to its tracker, so this is the first
+             * point at which freeing it is safe. */
+            kismet_ble_tracker_destroy(s_ble_tracker_in_quarantine);
+            s_ble_tracker_in_quarantine = NULL;
+        } else {
+            alive++;
+        }
+    }
+
+    return alive;
+}
+
+bool app_scan_native_radio_available(void)
+{
+    return release_quarantined_sessions() == 0u;
+}
+
 void app_scan_native_config_default(app_scan_native_config_t *out)
 {
     if (out == NULL) {
@@ -219,6 +335,27 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
     if (ev == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    /*
+     * 0. Reclaim anything a previous failed teardown left behind, and refuse to
+     *    take the radio while another task still owns it.
+     *
+     * `wifi_mgr_release_for_scan()` tears the STA driver down and the Kismet
+     * session builds its own. If a previous session never exited, that task may
+     * call esp_wifi_deinit() at any moment - after this scan has initialised the
+     * driver. Refusing here is the only ordering that cannot corrupt the driver's
+     * state; the stage is recorded FAILED so the scan is not presented as complete.
+     */
+    if (!app_scan_native_radio_available()) {
+        ESP_LOGE(TAG, "wifi stage refused: a previous session still owns the radio");
+        if (stats != NULL) {
+            stats->wifi_native_error = ESP_ERR_NOT_FINISHED;
+            stats->wifi_quarantine = s_wifi_quarantine_state;
+            stats->wifi_quarantine_set = true;
+        }
+        return ESP_ERR_NOT_FINISHED;
+    }
+
     if (config != NULL) {
         cfg = *config;
     } else {
@@ -313,26 +450,51 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
      * reports whether it actually did. Only a confirmed stop makes the tracker
      * and the evidence safe to read: that task is their only writer, so reading
      * them after an unconfirmed stop is a data race.
+     *
+     * When it did NOT stop, three things follow, and all three are handled here
+     * rather than being left to the next scan:
+     *
+     *   - the session is NOT freed and is NOT forgotten. It is moved to quarantine
+     *     with the tracker it still owns, because the tracker must outlive the
+     *     callbacks that write into it. Freeing it here would be the
+     *     use-after-free the bounded wait exists to avoid;
+     *   - no evidence is published and the stage is FAILED;
+     *   - the radio is reported as held, so the next Wi-Fi stage refuses to start
+     *     until that task has exited. The driver is handed back to the STA owner
+     *     only when it is ours to hand back.
      */
     stopped = kismet_wifi_session_destroy_checked(session) == ESP_OK;
-    session = NULL;
 
     if (stopped) {
+        session = NULL;
         ingest_wifi_tracker(ev, tracker);
         enrich_wifi_from_tracker(ev, tracker);
         (void)kismet_wifi_tracker_get_stats(tracker, &tracker_stats);
+        kismet_wifi_tracker_destroy(tracker);
+        tracker = NULL;
     } else {
-        /* The session could not be shut down, so its task may still be running.
-         * No evidence is published and the stage is reported as failed rather
-         * than as a thin success. */
-        ESP_LOGE(TAG, "wifi session did not stop within the bound; discarding evidence");
+        ESP_LOGE(TAG, "wifi session did not stop within the bound; evidence discarded "
+                      "and the radio is quarantined");
         if (stats != NULL) {
             stats->wifi_native_error = ESP_ERR_TIMEOUT;
         }
+        /*
+         * A second quarantine would mean the invariant broke: a new session cannot
+         * start while the first is alive, so this is a defect, not a state to
+         * absorb. Reported rather than silently overwriting the older handle,
+         * which would leak the tracker the older task still writes to.
+         */
+        if (s_quarantine.wifi != NULL) {
+            ESP_LOGE(TAG, "wifi quarantine already held; keeping the older session");
+            session = NULL;
+            tracker = NULL;
+        } else {
+            s_quarantine.wifi = session;
+            s_wifi_quarantine_state = APP_SCAN_RF_QUARANTINE_HELD;
+            session = NULL;
+            tracker = NULL; /* owned by the quarantined session from here on */
+        }
     }
-
-    kismet_wifi_tracker_destroy(tracker);
-    tracker = NULL;
 
     /*
      * Reduce the outcome to a stage verdict through the host-tested policy, and
@@ -362,14 +524,35 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
     err = stopped ? ESP_OK : ESP_ERR_TIMEOUT;
 
 restore:
-    /* 5. Always give the driver back, even on failure: otherwise the device
-     *    would be left with no network capability at all. */
-    {
+    /*
+     * 5. Give the driver back to the STA owner - but only when it is ours to give.
+     *
+     * `stopped` is false in two different situations, and they need opposite
+     * treatment:
+     *
+     *   - a session was started and its task refused to exit. That task still owns
+     *     the Wi-Fi driver and will call esp_wifi_stop()/esp_wifi_deinit() when it
+     *     finally does, so restoring STA here would initialise the driver
+     *     underneath it and let the old task tear the new one down. The radio is
+     *     quarantined instead: the STA owner is told not to touch it, and the next
+     *     Wi-Fi stage refuses to start until the task has exited.
+     *   - no session ever started (tracker creation, session start or the
+     *     release-for-scan itself failed). Nobody holds the driver, so it is
+     *     restored exactly as before. Quarantining here would strand the network
+     *     for a failure that never took the radio.
+     *
+     * Quarantining is not a lost capability: the reconnect happens in
+     * release_quarantined_sessions() the moment the task is gone, which is the
+     * earliest point at which it is safe.
+     */
+    if (stopped || s_quarantine.wifi == NULL) {
         esp_err_t restore_err = wifi_mgr_restore_after_scan();
         if (restore_err != ESP_OK) {
             ESP_LOGW(TAG, "wifi restore after scan failed: %s",
                      esp_err_to_name(restore_err));
         }
+    } else {
+        (void)wifi_mgr_quarantine();
     }
 
     if (session != NULL) {
@@ -470,6 +653,23 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
     if (ev == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    /*
+     * Reclaim anything a previous failed teardown left behind, and refuse to take
+     * the NimBLE host while another task still owns it. A quarantined BLE session
+     * will call nvs_flash and nimble_port_deinit() when it finally exits, so a new
+     * session started now would have its host torn down underneath it.
+     */
+    if (!app_scan_native_radio_available()) {
+        ESP_LOGE(TAG, "ble stage refused: a previous session still owns the radio");
+        if (stats != NULL) {
+            stats->ble_native_error = ESP_ERR_NOT_FINISHED;
+            stats->ble_quarantine = s_ble_quarantine_state;
+            stats->ble_quarantine_set = true;
+        }
+        return ESP_ERR_NOT_FINISHED;
+    }
+
     if (config != NULL) {
         cfg = *config;
     } else {
@@ -490,8 +690,12 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
     memset(&tracker_cfg, 0, sizeof(tracker_cfg));
     tracker_cfg.max_devices = cfg.ble_max_devices;
 
-    /* The Kismet session owns nvs_flash_init + nimble_port_init..deinit for its
-     * bounded duration. The application must NOT initialise NimBLE here. */
+    /*
+     * The Kismet session owns nvs_flash_init + nimble_port_init..deinit for its
+     * bounded duration. The application must NOT initialise NimBLE here - and the
+     * radio guard above is what makes that true even after a failed teardown: a
+     * quarantined session still owns the NimBLE host and will deinit it.
+     */
     err = kismet_ble_tracker_create(&tracker_cfg, &tracker);
     if (err != ESP_OK) {
         return err;
@@ -543,9 +747,35 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
      * reports whether it did. The report callback and the tracker are written from
      * that task, so only a confirmed stop makes the evidence safe to use; without
      * it the stage is FAILED with unusable evidence rather than a thin success.
+     *
+     * The tracker must NOT be destroyed when the stop is unconfirmed. It is the
+     * object the still-running task writes into: freeing it here would be a
+     * use-after-free in another task's stack, and it is exactly the corruption the
+     * bounded wait exists to avoid. Instead the session and its tracker move to
+     * quarantine together, are reclaimed once the task is gone, and the next BLE
+     * stage refuses to start until then - because that task also owns the NimBLE
+     * host, which it will tear down after any new session has brought it up.
      */
     stopped = kismet_ble_session_destroy_checked(session) == ESP_OK;
-    kismet_ble_tracker_destroy(tracker);
+
+    if (stopped) {
+        kismet_ble_tracker_destroy(tracker);
+        tracker = NULL;
+        session = NULL;
+    } else if (s_quarantine.ble != NULL) {
+        /* Two quarantined sessions would break the single-owner invariant. Report
+         * it and keep the older handle rather than overwriting it, which would
+         * leak the tracker that older task still writes to. */
+        ESP_LOGE(TAG, "ble quarantine already held; keeping the older session");
+        session = NULL;
+        tracker = NULL;
+    } else {
+        s_quarantine.ble = session;
+        s_ble_tracker_in_quarantine = tracker;
+        s_ble_quarantine_state = APP_SCAN_RF_QUARANTINE_HELD;
+        session = NULL;
+        tracker = NULL; /* both owned by the quarantine from here on */
+    }
 
     {
         app_scan_rf_outcome_t outcome;
@@ -559,11 +789,14 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
         if (stats != NULL) {
             stats->ble_verdict = app_scan_evaluate_rf_stage(&outcome);
             stats->ble_verdict_set = true;
+            stats->ble_quarantine = s_ble_quarantine_state;
+            stats->ble_quarantine_set = true;
         }
     }
 
     if (!stopped) {
-        ESP_LOGE(TAG, "ble session did not stop within the bound; stage failed");
+        ESP_LOGE(TAG, "ble session did not stop within the bound; stage failed, "
+                      "the NimBLE host stays quarantined");
         return ESP_ERR_TIMEOUT;
     }
     return result.native_error;

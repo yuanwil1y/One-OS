@@ -136,8 +136,27 @@ void kismet_ble_session_destroy(kismet_ble_session_t *session);
  * Returns ESP_ERR_TIMEOUT when the session task did not exit within the bound. In
  * that case nothing is freed and the NimBLE host may still be running; the caller
  * must not treat the scan as cleanly finished or publish its evidence.
+ *
+ * A timed-out session is NOT lost. The task sets `finished` as its last action
+ * before deleting itself, so the handle stays valid and the caller can:
+ *
+ *   1. keep the pointer and call kismet_ble_session_task_alive() later;
+ *   2. once that returns false, call destroy_checked() again - it then frees the
+ *      session immediately, because `finished` is already set.
+ *
+ * Until then the session owns nvs_flash and the NimBLE host, so nothing may call
+ * nvs_flash_init() or nimble_port_init() and no new session may be started.
  */
 esp_err_t kismet_ble_session_destroy_checked(kismet_ble_session_t *session);
+
+/*
+ * Is the session's task still running?
+ *
+ * Safe to call on a session whose teardown timed out, and the only supported way
+ * to decide whether the NimBLE host lifecycle has been handed back. Returns false
+ * for a NULL session and for one whose task has reached its completion point.
+ */
+bool kismet_ble_session_task_alive(const kismet_ble_session_t *session);
 
 /* Tracker enumeration/get calls are intended after the mutating session has
  * completed (or otherwise under application-owned serialization). */

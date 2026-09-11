@@ -270,8 +270,31 @@ void kismet_wifi_session_destroy(kismet_wifi_session_t *session);
  * that case nothing is freed and the session stays active; the caller must treat
  * its evidence as unusable rather than publishing it, and must not start another
  * session expecting this one to be gone.
+ *
+ * A timed-out session is NOT lost. The task sets `finished` as its last action
+ * before deleting itself, so the handle stays valid and the caller can:
+ *
+ *   1. keep the pointer and call kismet_wifi_session_task_alive() later;
+ *   2. once that returns false, call destroy_checked() again - it then frees the
+ *      session immediately, because `finished` is already set.
+ *
+ * The task owns the native Wi-Fi driver until it reaches its cleanup block, so
+ * nothing in the application may call esp_wifi_init() while it is alive. That is
+ * the reason the caller must hold the handle rather than forget it.
  */
 esp_err_t kismet_wifi_session_destroy_checked(kismet_wifi_session_t *session);
+
+/*
+ * Is the session's task still running?
+ *
+ * Safe to call on a session whose teardown timed out, and the only supported way
+ * to decide whether the native radio has been handed back. Returns false for a
+ * NULL session and for one whose task has reached its completion point.
+ *
+ * A true result means: the session still owns the Wi-Fi driver, its callback may
+ * still run, and no new session may be started.
+ */
+bool kismet_wifi_session_task_alive(const kismet_wifi_session_t *session);
 
 /* Tracker enumeration/get calls are intended after the mutating session has
  * completed (or otherwise under application-owned serialization). */

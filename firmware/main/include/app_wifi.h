@@ -47,6 +47,19 @@ typedef enum {
     WIFI_MGR_CONNECTING,
     WIFI_MGR_CONNECTED,      /* has an IP */
     WIFI_MGR_ERROR,          /* driver or connection failure, see last_error */
+    /*
+     * The radio is not ours to take.
+     *
+     * A Kismet scan whose teardown timed out still owns the Wi-Fi driver: its task
+     * has not reached esp_wifi_deinit() yet, and it will. Initialising the driver
+     * before that happens would let the old task deinitialise the driver a new
+     * session is using, so no Wi-Fi operation may start until the task exits.
+     *
+     * This is a distinct state rather than ERROR because it is not a failure of
+     * this module and it clears by itself: the scan side reclaims the session once
+     * the task is gone and calls wifi_mgr_release_quarantine().
+     */
+    WIFI_MGR_QUARANTINED,
 } wifi_mgr_state_t;
 
 typedef struct {
@@ -58,6 +71,8 @@ typedef struct {
     esp_err_t last_error;
     /* True while the driver is deliberately released for a Kismet scan. */
     bool released_for_scan;
+    /* True while the radio is held by a scan session that did not release it. */
+    bool quarantined;
 } wifi_mgr_status_t;
 
 const char *wifi_mgr_state_name(wifi_mgr_state_t state);
@@ -92,8 +107,31 @@ esp_err_t wifi_mgr_release_for_scan(bool *out_was_started, bool *out_was_connect
  * Returns ESP_OK when the driver is usable again. A failed reconnect is
  * reported through wifi_mgr_get_status() (state ERROR/DISCONNECTED plus
  * last_error); it is never reported as connected.
+ *
+ * Refuses with ESP_ERR_INVALID_STATE while the radio is quarantined, so a caller
+ * that ignored the scan-side guard cannot cause esp_wifi_init() to run underneath
+ * a task that is about to call esp_wifi_deinit().
  */
 esp_err_t wifi_mgr_restore_after_scan(void);
+
+/*
+ * Mark the radio as held by a scan session that could not be stopped.
+ *
+ * Called by the scan path when a Kismet Wi-Fi session's teardown timed out. Until
+ * wifi_mgr_release_quarantine() is called, every operation that would initialise
+ * the driver returns ESP_ERR_INVALID_STATE and the reported state is
+ * WIFI_MGR_QUARANTINED. Idempotent.
+ */
+esp_err_t wifi_mgr_quarantine(void);
+
+/*
+ * The quarantined session's task has exited and the radio is free again.
+ *
+ * Clears the quarantine and reconnects through the normal path, so the reported
+ * state is never "connected" unless an address really exists. Returns
+ * ESP_ERR_INVALID_STATE when no quarantine was held.
+ */
+esp_err_t wifi_mgr_release_quarantine(void);
 
 /* Copy the current status. Safe from any task. */
 void wifi_mgr_get_status(wifi_mgr_status_t *out);

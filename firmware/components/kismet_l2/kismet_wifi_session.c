@@ -34,6 +34,9 @@ struct kismet_wifi_session {
     TaskHandle_t task;
     volatile bool cancel;
     volatile bool finished;
+    /* Set by destroy_checked() once it has taken the completion semaphore, i.e.
+     * once the task has provably stopped touching this session. */
+    volatile bool claimed;
     uint8_t channels[KISMET_WIFI_MAX_CHANNELS];
     uint8_t channel_count;
     kismet_wifi_session_result_t result;
@@ -239,6 +242,9 @@ out:
     portENTER_CRITICAL(&s_active_lock);
     if (s_active == s) s_active = NULL;
     portEXIT_CRITICAL(&s_active_lock);
+    /* Last action before self-deletion, and deliberately after every other write
+     * to this session: destroy_checked() treats a successful take of this
+     * semaphore as proof that the task can no longer touch the session. */
     xSemaphoreGive(s->done);
     vTaskDelete(NULL);
 }
@@ -340,21 +346,56 @@ esp_err_t kismet_wifi_session_destroy_checked(kismet_wifi_session_t *s)
          * remove the operation's timeout guarantee, so the wait is finite.
          *
          * If the task does NOT finish in time we must NOT free: it still holds
-         * pointers into this session, its queue and its semaphore, so freeing
-         * would be a use-after-free in another task's stack. The session is
-         * intentionally leaked instead and the caller is told, so it can fail the
-         * operation rather than publish evidence from a session it cannot shut
-         * down. Leaking one small session is strictly better than corrupting
-         * memory or hanging the application forever.
+         * pointers into this session, its queue and its semaphore, and it will
+         * dereference them when it finally completes, so freeing would be a
+         * use-after-free in another task's stack. The session is intentionally
+         * leaked instead and the caller is told, so it can fail the operation
+         * rather than publish evidence from a session it cannot shut down.
+         *
+         * The leak is RECOVERABLE, not permanent: the task sets `finished` before
+         * it deletes itself, so the handle the caller still holds becomes
+         * destroyable as soon as that flag is set. See
+         * kismet_wifi_session_task_alive().
          */
         if (xSemaphoreTake(s->done, pdMS_TO_TICKS(KISMET_WIFI_DESTROY_TIMEOUT_MS)) != pdTRUE) {
-            /* Every allocation is left in place on purpose. */
+            /* Every allocation is left in place on purpose, and the handle stays
+             * valid for a later retry. */
             return ESP_ERR_TIMEOUT;
         }
+        /*
+         * Taking the completion semaphore is the claim, and it is what makes the
+         * free below safe. The task gives it as the VERY LAST thing it does before
+         * vTaskDelete(NULL), after it has finished touching every field, so a
+         * successful take proves there is no later access.
+         *
+         * This is why `finished` alone is not the safety condition: a task that has
+         * set `finished` is still running until it reaches the give, and freeing
+         * there would be a use-after-free on its stack. `claimed` records that the
+         * give has actually been observed.
+         */
+        s->claimed = true;
         xSemaphoreGive(s->done);
     }
     vQueueDelete(s->queue);
     vSemaphoreDelete(s->done);
     free(s);
     return ESP_OK;
+}
+
+bool kismet_wifi_session_task_alive(const kismet_wifi_session_t *s)
+{
+    if (!s) return false;
+    /*
+     * Alive until BOTH conditions hold:
+     *
+     *   - `finished`, written by the task once its cleanup block is done, so the
+     *     native Wi-Fi driver has been handed back;
+     *   - `claimed`, set by destroy_checked() when it has taken the completion
+     *     semaphore, which the task gives as its last action.
+     *
+     * `claimed` is what makes reclamation safe rather than merely probable. A task
+     * that has set `finished` is still executing and still holds a pointer into
+     * the session; only the semaphore give proves it has stopped touching it.
+     */
+    return !(s->finished && s->claimed);
 }

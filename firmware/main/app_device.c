@@ -58,6 +58,9 @@ static uint32_t s_swept;
 
 /* Defined below; needed by the eviction path to avoid orphaned Entities. */
 static void entity_slot_free_for_device(const char *device_id);
+/* Defined below; needed by the generation sweep to keep Entity availability in
+ * step with the binding's. */
+static void sync_device_availability(device_slot_t *slot);
 const char *app_recognition_name(app_recognition_state_t state)
 {
     switch (state) {
@@ -191,6 +194,61 @@ static void entity_slot_free_for_device(const char *device_id)
             strcmp(s_entities[i].value.device_id, device_id) == 0) {
             memset(&s_entities[i], 0, sizeof(s_entities[i]));
         }
+    }
+}
+
+/*
+ * Push a device's availability into ha_core, where the Entity and its State live.
+ *
+ * Without this the three views disagree: the binding table says STALE, the Entity
+ * still says available, and a GUI reading either would show a different truth
+ * depending on which one it happened to read. The rule is stated once here:
+ *
+ *   - ONLINE      -> entity available
+ *   - STALE       -> entity UNAVAILABLE. The entity keeps its identity, its name,
+ *                    its unit and its last state; only its availability changes.
+ *                    Deleting it would lose exactly what a returning device needs
+ *                    and would renumber the entity table on every RF hiccup.
+ *   - UNAVAILABLE -> entity UNAVAILABLE, for the same reason.
+ *   - UNKNOWN     -> left alone; nothing has been observed yet.
+ *
+ * `available == false` is also what a future control path must check before
+ * dispatching, so this is the single place that makes "the device is not there"
+ * visible to every consumer.
+ */
+static void entity_set_available(const char *entity_id, bool available)
+{
+    const ha_entity_t *current = ha_core_entity_get(entity_id);
+
+    if (current == NULL) {
+        return;
+    }
+    if (current->available == available) {
+        return;
+    }
+    {
+        ha_entity_t updated = *current;
+
+        updated.available = available;
+        (void)ha_core_entity_upsert(&updated);
+    }
+}
+
+static void sync_device_availability(device_slot_t *slot)
+{
+    const bool available = slot->value.availability == APP_AVAILABILITY_ONLINE;
+
+    if (slot->value.availability == APP_AVAILABILITY_UNKNOWN) {
+        return;
+    }
+    for (size_t i = 0u; i < APP_ENTITY_MAX; ++i) {
+        if (!s_entities[i].in_use) {
+            continue;
+        }
+        if (strcmp(s_entities[i].value.device_id, slot->value.device_id) != 0) {
+            continue;
+        }
+        entity_set_available(s_entities[i].value.entity_id, available);
     }
 }
 
@@ -385,26 +443,58 @@ void app_device_generation_finish(const app_scan_status_t *scan)
         if (seen_by_any) {
             slot->value.availability = APP_AVAILABILITY_ONLINE;
             slot->value.last_generation = s_generation;
+            slot->value.miss_rounds = 0u;
             continue;
         }
 
         /*
-         * Not observed by any source this generation. Absence is only evidence
-         * when every source that has observed this device was fully covered;
-         * otherwise keep the device and mark it unavailable, so a partial scan
-         * cannot make devices disappear.
+         * Not observed by any source this generation.
+         *
+         * `fully_covered` is the whole question: it is true only when EVERY
+         * protocol that has ever observed this device covered its protocol
+         * completely this generation. A skipped, failed, cancelled or merely
+         * partial stage may simply have missed the device, so its silence proves
+         * nothing and must not be read as a departure.
          */
-        if (slot->value.ephemeral && device_all_sources_fully_covered(slot, scan)) {
+        if (!device_all_sources_fully_covered(slot, scan)) {
+            /* "We could not look" - weaker than "we looked and it was gone". The
+             * device keeps its identity, its recognition and its entities, and is
+             * reported as unavailable. A persistent authorized identity lives here
+             * permanently when it is out of range, which is what stops an outage
+             * from erasing a commissioning it once held. */
+            slot->value.availability = APP_AVAILABILITY_UNAVAILABLE;
+            slot->value.miss_rounds = 0u;
+            sync_device_availability(slot);
+            continue;
+        }
+
+        /*
+         * Absence is real evidence now. It is still not proof: a single RF report
+         * can be lost for reasons that have nothing to do with the device leaving,
+         * so an ephemeral device is kept for APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT
+         * consecutive fully covered misses before it is removed.
+         *
+         * The wait is deliberately spent on a visible state rather than on
+         * silence: the device is shown as stale, so an operator sees "we are no
+         * longer hearing it" one round before it disappears, instead of seeing it
+         * vanish with no warning.
+         */
+        if (slot->value.miss_rounds < 0xFFu) {
+            slot->value.miss_rounds++;
+        }
+        slot->value.availability = APP_AVAILABILITY_STALE;
+
+        if (slot->value.ephemeral &&
+            slot->value.miss_rounds >= APP_DEVICE_MISS_ROUNDS_BEFORE_EVICT) {
             entity_slot_free_for_device(slot->value.device_id);
             (void)ha_core_device_remove(slot->value.ha_device_id);
             memset(slot, 0, sizeof(*slot));
             s_swept++;
         } else {
-            /* Persistent identity, or incomplete coverage. Which unavailable
-             * state is used depends on whether we ever did observe it. */
-            slot->value.availability = (slot->value.last_generation != 0u)
-                                           ? APP_AVAILABILITY_STALE
-                                           : APP_AVAILABILITY_UNAVAILABLE;
+            /* Kept. The entity set is retained too: it is the device's identity,
+             * and a returning device must not have to be rediscovered from
+             * scratch. */
+            sync_device_availability(slot);
         }
     }
 }
@@ -633,10 +723,14 @@ static bool recognition_record(app_recognition_table_t *table,
     if (recognizer == NULL || recognizer->ops == NULL ||
         recognizer->ops->recognize == NULL) {
         entry->attempted = false;
+        entry->db_state = APP_DB_STATE_CLOSED;
         return true;
     }
 
     memset(&result, 0, sizeof(result));
+    entry->db_state = recognizer->ops->state != NULL
+                          ? recognizer->ops->state(recognizer->ctx)
+                          : APP_DB_STATE_CLOSED;
     if (!recognizer->ops->recognize(recognizer->ctx, sources, wifi, ble, lan,
                                     &result)) {
         entry->attempted = false;
@@ -645,16 +739,36 @@ static bool recognition_record(app_recognition_table_t *table,
 
     entry->attempted = true;
     if (result.ambiguous) {
-        /* Ambiguity is carried through but never as a match: no recipe, no
-         * display metadata, nothing writable. */
-        memset(&entry->result, 0, sizeof(entry->result));
-        entry->result.ambiguous = true;
-        entry->result.theengs_decoder_id = DEVICE_DB_NO_INDEX;
-        entry->result.zha_quirk_id = DEVICE_DB_NO_INDEX;
-        entry->result.backend_name = "none";
+        /*
+         * Ambiguity is carried through but never as a match: no recipe, no
+         * display metadata, nothing writable. The ids are still recorded for
+         * diagnostics - they say which families the corpus named - but nothing
+         * acts on them.
+         */
+        entry->ambiguous = true;
+        entry->theengs_decoder_id = DEVICE_DB_NO_INDEX;
+        entry->zha_quirk_id = DEVICE_DB_NO_INDEX;
+        entry->backend_name = "none";
         return true;
     }
-    entry->result = result;
+
+    entry->matched = result.matched;
+    entry->profile_id = result.profile_id;
+    entry->theengs_decoder_id = result.theengs_decoder_id;
+    entry->zha_quirk_id = result.zha_quirk_id;
+    entry->backend_supported = result.backend_supported;
+    entry->backend_name = result.backend_name;
+    entry->recipe_count = result.recipe_count;
+    (void)app_strlcpy(entry->display_name, result.display_name,
+                      sizeof(entry->display_name));
+    (void)app_strlcpy(entry->vendor, result.vendor, sizeof(entry->vendor));
+    (void)app_strlcpy(entry->model, result.model, sizeof(entry->model));
+    if (result.recipe_count > APP_RECOGNITION_MAX_RECIPES) {
+        entry->recipe_count = APP_RECOGNITION_MAX_RECIPES;
+    }
+    for (uint8_t i = 0u; i < entry->recipe_count; ++i) {
+        entry->recipes[i] = result.recipes[i];
+    }
     return true;
 }
 
@@ -751,14 +865,20 @@ static bool table_recognizer_recognize(void *ctx, uint32_t sources,
         return false;
     }
 
+    /* One source bit identifies the observation, so the same helper the device
+     * table uses builds the key here too. */
     if (identity_of_observation(sources, wifi, ble, lan, identity,
                                 sizeof(identity))) {
         entry = app_recognition_table_find(table, identity);
     }
 
     if (entry == NULL || !entry->attempted) {
-        /* No outcome was recorded for this observation, so recognition could not
-         * run. Reported as such rather than as "not matched". */
+        /*
+         * No outcome was recorded for this observation, so recognition could not
+         * run. Reported as such rather than as "not matched": the device stays
+         * generic and the report says recognition was unavailable, which is a
+         * different statement from "we looked and found nothing".
+         */
         memset(out, 0, sizeof(*out));
         out->theengs_decoder_id = DEVICE_DB_NO_INDEX;
         out->zha_quirk_id = DEVICE_DB_NO_INDEX;
@@ -766,8 +886,24 @@ static bool table_recognizer_recognize(void *ctx, uint32_t sources,
         return false;
     }
 
-    *out = entry->result;
-    (void)sources;
+    /* Rebuild the result the matcher produced from the stored entry. */
+    memset(out, 0, sizeof(*out));
+    out->matched = entry->matched;
+    out->ambiguous = entry->ambiguous;
+    out->profile_id = entry->profile_id;
+    out->theengs_decoder_id = entry->theengs_decoder_id;
+    out->zha_quirk_id = entry->zha_quirk_id;
+    out->backend_supported = entry->backend_supported;
+    out->backend_name = entry->backend_name != NULL ? entry->backend_name : "none";
+    out->recipe_count = entry->recipe_count;
+    (void)app_strlcpy(out->display_name, entry->display_name,
+                      sizeof(out->display_name));
+    (void)app_strlcpy(out->vendor, entry->vendor, sizeof(out->vendor));
+    (void)app_strlcpy(out->model, entry->model, sizeof(out->model));
+    for (uint8_t i = 0u; i < entry->recipe_count && i < APP_RECOGNITION_MAX_RECIPES;
+         ++i) {
+        out->recipes[i] = entry->recipes[i];
+    }
     return true;
 }
 
@@ -780,8 +916,12 @@ static app_db_state_t table_recognizer_state(void *ctx)
     }
     for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
         if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT) {
+            /* The state the database itself reported when this entry was decided.
+             * Returning READY/CLOSED from the `attempted` flag would lose the
+             * reason: "the card is missing" and "the corpus is corrupt" are
+             * different problems and Settings has to show which one it is. */
             return table->entries[i].attempted ? APP_DB_STATE_READY
-                                               : APP_DB_STATE_CLOSED;
+                                               : table->entries[i].db_state;
         }
     }
     return APP_DB_STATE_CLOSED;
@@ -931,6 +1071,10 @@ static device_slot_t *device_upsert(const char *device_id,
         slot->seen_lan = true;
     }
     slot->value.availability = APP_AVAILABILITY_ONLINE;
+    /* Seen by any source cancels the eviction countdown. Without this a device
+     * that flickers in and out would accumulate misses across rounds and be
+     * removed while it is still present. */
+    slot->value.miss_rounds = 0u;
     if (seen_ms >= slot->value.last_seen_ms) {
         slot->value.last_seen_ms = seen_ms;
     }

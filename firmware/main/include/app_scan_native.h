@@ -39,6 +39,27 @@ typedef struct {
     uint16_t ble_max_devices;
 } app_scan_native_config_t;
 
+/*
+ * Ownership of a radio after a teardown that did not complete.
+ *
+ * When a Kismet session's bounded teardown expires, the session is deliberately
+ * not freed: its task still dereferences it, and - the part that matters for the
+ * rest of the application - that task still owns the underlying radio. The Wi-Fi
+ * session calls esp_wifi_stop()/esp_wifi_deinit() in its own cleanup, and the BLE
+ * session owns nvs_flash and the NimBLE host.
+ *
+ * So a timed-out session is not merely a leak. It is a live owner of hardware the
+ * application must not touch, and the application records that explicitly instead
+ * of assuming the radio is free.
+ */
+typedef enum {
+    APP_SCAN_RF_QUARANTINE_NONE = 0,
+    APP_SCAN_RF_QUARANTINE_HELD,      /* a session is alive and owns the radio */
+    APP_SCAN_RF_QUARANTINE_RECLAIMED, /* it exited later and has been released */
+} app_scan_rf_quarantine_t;
+
+const char *app_scan_rf_quarantine_name(app_scan_rf_quarantine_t state);
+
 typedef struct {
     uint32_t frames_parsed;
     uint32_t frames_malformed;
@@ -66,6 +87,13 @@ typedef struct {
     app_scan_rf_verdict_t wifi_verdict;
     bool ble_verdict_set;
     app_scan_rf_verdict_t ble_verdict;
+    /* Whether the stage had to quarantine its radio, and what happened to it
+     * afterwards. Reported so "this scan could not use the radio" is visible
+     * rather than looking like an empty environment. */
+    app_scan_rf_quarantine_t wifi_quarantine;
+    bool wifi_quarantine_set;
+    app_scan_rf_quarantine_t ble_quarantine;
+    bool ble_quarantine_set;
 } app_scan_native_stats_t;
 
 void app_scan_native_config_default(app_scan_native_config_t *out);
@@ -119,6 +147,28 @@ esp_err_t app_scan_native_lan_services(app_scan_evidence_t *ev,
 /* True when this stage was requested to stop. Set by the application worker. */
 void app_scan_native_request_cancel(bool canceled);
 bool app_scan_native_cancel_requested(void);
+
+/*
+ * Is the radio free to be taken?
+ *
+ * Reclaims every quarantined session whose task has since exited, and returns
+ * true only when nothing is left holding the radio. Both RF stages call this
+ * before doing anything, so no stage can initialise a driver that a previous
+ * session's task is still going to deinitialise.
+ *
+ * The reclamation is also what makes a failed teardown recoverable rather than
+ * permanent: the session, its queue, its semaphores and (for BLE) the tracker its
+ * callbacks write into are all freed here, at the first moment it is safe.
+ *
+ * Idempotent and cheap when nothing is quarantined.
+ */
+bool app_scan_native_radio_available(void);
+
+/* How the Wi-Fi and BLE radios stand, for diagnostics. The RECLAIMED value is
+ * remembered until the next quarantine, so an operator can see that a failed
+ * teardown did eventually recover instead of it being silently forgotten. */
+app_scan_rf_quarantine_t app_scan_native_wifi_quarantine(void);
+app_scan_rf_quarantine_t app_scan_native_ble_quarantine(void);
 
 #ifdef __cplusplus
 }
