@@ -424,9 +424,21 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     }
     {
         const app_device_binding_t *ble_dev = app_device_find("ble_007000000002");
-        CHECK(ble_dev != NULL &&
-                  ble_dev->availability == APP_AVAILABILITY_ONLINE,
-              "ble device refreshed and online");
+        CHECK(ble_dev != NULL, "ble device present");
+        if (ble_dev == NULL) {
+            /* Dump what is actually registered so a failure is diagnosable. */
+            printf("  registered devices (%u):\n", (unsigned)app_device_count());
+            for (size_t i = 0u; i < app_device_count(); ++i) {
+                const app_device_binding_t *b = app_device_at(i);
+                printf("    [%u] id=%s sources=0x%x avail=%s gen=%lu\n",
+                       (unsigned)i, b->device_id, (unsigned)b->sources,
+                       app_availability_name(b->availability),
+                       (unsigned long)b->last_generation);
+            }
+        }
+        CHECK(ble_dev != NULL && ble_dev->availability == APP_AVAILABILITY_ONLINE,
+              "ble device refreshed and online (avail=%s)",
+              ble_dev ? app_availability_name(ble_dev->availability) : "absent");
     }
 
     /* Generation 3: BLE ran and no longer sees the sensor, so it is genuinely
