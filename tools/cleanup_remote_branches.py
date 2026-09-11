@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Preview audited obsolete branches; --apply backs up and deletes exact refs."""
+"""Preview audited obsolete branches; --apply backs up and deletes exact refs.
+
+Status: this audited cleanup has already been executed. All 20 branches listed
+in tools/branch-cleanup-candidates.tsv were deleted with per-branch leases and
+an atomic push, after a full mirror backup. Only ``main`` and
+``research/matter-chip-tool-l2-api`` remain, and both beta tags/Releases are
+untouched.
+
+Re-running is safe and is expected to report every candidate as already absent.
+If a candidate reappears with a different SHA the script stops and requires a
+fresh audit instead of force-deleting it.
+"""
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
