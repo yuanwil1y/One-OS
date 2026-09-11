@@ -300,6 +300,23 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\test_app_provision.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
         }
+        'app_control' {
+            # APP_DEVICE_TEST_HOOKS compiles the app_device test hooks in. The macro is
+            # set only by host runners, so the firmware image never contains them.
+            Build-And-Run 'app_control' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_control.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
         'device_db_python' {
             Invoke-Step 'regenerate fixture' $py @((Join-Path $Root 'tools\device_db\build_device_db.py'))
             Invoke-Step 'regenerate invalid variants' $py @((Join-Path $Root 'tools\device_db\make_invalid_fixtures.py'))

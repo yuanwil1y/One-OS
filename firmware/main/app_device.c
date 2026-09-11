@@ -13,6 +13,10 @@
 #include "app_recognizer.h"
 #include "app_str.h"
 
+#ifdef APP_DEVICE_TEST_HOOKS
+#include "app_device_test_hooks.h"
+#endif
+
 #include <stdio.h>
 #include <string.h>
 
@@ -1149,6 +1153,10 @@ static void entity_upsert(device_slot_t *device,
         /* No writable entity exists yet: every binding is read-only until a
          * protocol profile with a verified control path is available. */
         slot->value.writable = false;
+        slot->value.backend = APP_ENTITY_BACKEND_NONE;
+        slot->value.backend_name = "none";
+        slot->value.write_target_id = DEVICE_DB_NO_INDEX;
+        slot->value.has_range = false;
     }
 
     if (state_value != NULL) {
@@ -1317,6 +1325,29 @@ static void entity_upsert_recipe(device_slot_t *device,
         (void)app_strlcpy(slot->value.unit, recipe->unit, sizeof(slot->value.unit));
     }
     slot->value.writable = writable;
+    /*
+     * The control binding travels with the entity, resolved once here rather than
+     * re-derived by the control loop.
+     *
+     * A read-only entity reports no backend even when its recipe names one: `writable`
+     * is already the decision that the recipe, the profile's declaration and this
+     * firmware's drivable set all agreed, and the control loop must not be able to
+     * arrive at a different answer by re-reading the same facts.
+     */
+    if (writable) {
+        slot->value.backend = recipe->backend;
+        slot->value.backend_name = app_backend_name(recipe->backend);
+        slot->value.write_target_id = recipe->write_target_id;
+        slot->value.has_range = true;
+        slot->value.min_value = recipe->min_value;
+        slot->value.max_value = recipe->max_value;
+        slot->value.scale = recipe->scale;
+    } else {
+        slot->value.backend = APP_ENTITY_BACKEND_NONE;
+        slot->value.backend_name = "none";
+        slot->value.write_target_id = DEVICE_DB_NO_INDEX;
+        slot->value.has_range = false;
+    }
 }
 
 /* ---------------- recognition ---------------- */
@@ -1682,3 +1713,122 @@ size_t app_device_materialize(const app_scan_evidence_t *ev,
     }
     return materialized;
 }
+
+/*
+ * ============================================================================
+ * Test hooks - compiled only when APP_DEVICE_TEST_HOOKS is defined.
+ *
+ * Not present in the firmware image: the macro is set by the host test runners and
+ * by nothing else, so these three functions do not exist on the target. See
+ * app_device_test_hooks.h for why they exist at all.
+ * ============================================================================
+ */
+#ifdef APP_DEVICE_TEST_HOOKS
+
+void app_device_test_bind_entity(const char *entity_id, const char *device_id,
+                                 uint8_t backend, bool has_range, int32_t min_value,
+                                 int32_t max_value)
+{
+    entity_slot_t *slot;
+    device_slot_t *device;
+    const ha_entity_t *ha;
+
+    if (entity_id == NULL || device_id == NULL) {
+        return;
+    }
+
+    /*
+     * The device binding as well as the entity binding.
+     *
+     * A writable entity is only controllable when its Device is known and ONLINE, and
+     * the control loop checks that before it reaches any backend. A hook that placed
+     * only the entity would therefore produce a binding the loop correctly refuses, and
+     * every test written on top of it would be testing the refusal rather than the
+     * thing it meant to test - which is exactly how this hook failed when it was first
+     * used.
+     *
+     * Availability is set to ONLINE here because a test that wants the device offline
+     * marks it so explicitly; leaving it at UNKNOWN would make the default state an
+     * unusable one.
+     */
+    device = device_slot_find(device_id);
+    if (device == NULL) {
+        device = device_slot_alloc();
+        if (device == NULL) {
+            return;
+        }
+        (void)app_strlcpy(device->value.device_id, device_id,
+                          sizeof(device->value.device_id));
+        (void)app_strlcpy(device->value.ha_device_id, device_id,
+                          sizeof(device->value.ha_device_id));
+        device->value.ephemeral = true;
+        device->value.read_only = true;
+        device->value.recognition = APP_RECOGNITION_UNKNOWN;
+        device->value.availability = APP_AVAILABILITY_ONLINE;
+    }
+
+    ha = ha_core_entity_get(entity_id);
+    slot = entity_slot_find(entity_id);
+    if (slot == NULL) {
+        slot = entity_slot_alloc();
+        if (slot == NULL) {
+            return;
+        }
+        (void)app_strlcpy(slot->value.entity_id, entity_id,
+                          sizeof(slot->value.entity_id));
+        (void)app_strlcpy(slot->value.device_id, device_id,
+                          sizeof(slot->value.device_id));
+        (void)app_strlcpy(slot->value.domain,
+                          ha != NULL ? ha->domain : "switch",
+                          sizeof(slot->value.domain));
+        (void)app_strlcpy(slot->value.name, ha != NULL ? ha->name : "Test",
+                          sizeof(slot->value.name));
+        (void)app_strlcpy(slot->value.unit,
+                          ha != NULL ? ha->unit_of_measurement : "",
+                          sizeof(slot->value.unit));
+    }
+
+    /*
+     * Writability is derived from what the entity actually advertises, so a test
+     * cannot place a binding that claims to be controllable while offering no service.
+     * That inconsistency is exactly what the control loop's admission checks catch, and
+     * a helper that could create it would make those checks untestable.
+     */
+    slot->value.writable = ha != NULL && ha->supported_services != 0u;
+    if (slot->value.writable) {
+        slot->value.backend = backend;
+        slot->value.backend_name = app_backend_name(backend);
+        slot->value.write_target_id = 0u;
+        slot->value.has_range = has_range;
+        slot->value.min_value = min_value;
+        slot->value.max_value = max_value;
+    } else {
+        slot->value.backend = APP_ENTITY_BACKEND_NONE;
+        slot->value.backend_name = "none";
+        slot->value.write_target_id = DEVICE_DB_NO_INDEX;
+        slot->value.has_range = false;
+    }
+}
+
+void app_device_test_mark_availability(const char *device_id,
+                                       app_availability_t availability)
+{
+    device_slot_t *slot = device_slot_find(device_id);
+
+    if (slot == NULL) {
+        return;
+    }
+    slot->value.availability = availability;
+    sync_device_availability(slot);
+}
+
+void app_device_test_forget_entity(const char *entity_id)
+{
+    entity_slot_t *slot = entity_slot_find(entity_id);
+
+    if (slot != NULL) {
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
+#endif /* APP_DEVICE_TEST_HOOKS */
