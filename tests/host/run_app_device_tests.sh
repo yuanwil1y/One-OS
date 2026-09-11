@@ -1,9 +1,11 @@
 #!/usr/bin/env sh
 # Host regression tests for the application Device/Entity binding table.
 #
-# app_device.c is compiled against the real ha_core, so these tests exercise the
-# production identity, dedup, generation, sweep and read-only rules rather than a
-# mock of them.
+# app_device.c is compiled against the real ha_core and the real recognition
+# policy, so these tests exercise the production identity, dedup, generation,
+# sweep and read-only rules rather than a mock of them. Recognition itself is
+# supplied by the test as a stub recognizer, which is what keeps this group free
+# of any filesystem dependency.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -22,6 +24,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   "$ROOT/firmware/main/app_str.c" \
   "$ROOT/firmware/main/app_ops.c" \
   "$ROOT/firmware/main/app_scan.c" \
+  "$ROOT/firmware/main/app_recognition.c" \
   "$ROOT/firmware/main/app_device.c" \
   "$ROOT/tests/host/test_app_device.c" \
   -o "$OUT"
