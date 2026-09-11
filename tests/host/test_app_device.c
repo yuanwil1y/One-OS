@@ -335,19 +335,9 @@ static app_scan_status_t scan_report_with(app_scan_stage_t a, app_scan_stage_t b
     return scan;
 }
 
-/* Build a report from an explicit per-stage state map. */
-static app_scan_status_t scan_report_states(const app_stage_state_t *states)
-{
-    app_scan_status_t scan;
-
-    memset(&scan, 0, sizeof(scan));
-    for (int i = 0; i < (int)APP_STAGE_COUNT; ++i) {
-        scan.states[i] = states[i];
-    }
-    return scan;
-}
-
-/* All stages SKIPPED. */
+/* Build a report with every stage SKIPPED. Tests then set the stages they care
+ * about through the returned struct, which makes each test state its own
+ * coverage explicitly instead of inheriting a default. */
 static app_scan_status_t scan_report_none(void)
 {
     app_scan_status_t scan;
