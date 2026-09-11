@@ -52,6 +52,20 @@ typedef struct {
     esp_err_t ble_native_error;
     bool wifi_canceled;
     bool ble_canceled;
+    /*
+     * The verdict each RF stage reached, computed by the host-tested policy in
+     * app_scan_evaluate_rf_stage().
+     *
+     * The caller records this state directly. A stage must not be recorded as DONE
+     * merely because its function returned ESP_OK: a session that could not be
+     * shut down, or a stage that ended on its own deadline, is PARTIAL or FAILED
+     * even though the call returned something the caller might read as success.
+     * `*_verdict_set` is false when the stage never reached a verdict.
+     */
+    bool wifi_verdict_set;
+    app_scan_rf_verdict_t wifi_verdict;
+    bool ble_verdict_set;
+    app_scan_rf_verdict_t ble_verdict;
 } app_scan_native_stats_t;
 
 void app_scan_native_config_default(app_scan_native_config_t *out);

@@ -119,7 +119,25 @@ esp_err_t kismet_ble_session_cancel(kismet_ble_session_t *session);
 esp_err_t kismet_ble_session_wait(kismet_ble_session_t *session, uint32_t timeout_ms);
 esp_err_t kismet_ble_session_get_result(const kismet_ble_session_t *session,
                                         kismet_ble_session_result_t *out_result);
+
+/*
+ * Release a session.
+ *
+ * Teardown is bounded: it waits a finite time for the session task to exit. If the
+ * task does not exit in time the session is deliberately NOT freed, because that
+ * task still references it. Use the _checked form to learn whether teardown
+ * completed.
+ */
 void kismet_ble_session_destroy(kismet_ble_session_t *session);
+
+/*
+ * As kismet_ble_session_destroy(), but reports whether teardown completed.
+ *
+ * Returns ESP_ERR_TIMEOUT when the session task did not exit within the bound. In
+ * that case nothing is freed and the NimBLE host may still be running; the caller
+ * must not treat the scan as cleanly finished or publish its evidence.
+ */
+esp_err_t kismet_ble_session_destroy_checked(kismet_ble_session_t *session);
 
 /* Tracker enumeration/get calls are intended after the mutating session has
  * completed (or otherwise under application-owned serialization). */

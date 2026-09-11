@@ -251,7 +251,27 @@ esp_err_t kismet_wifi_session_cancel(kismet_wifi_session_t *session);
 esp_err_t kismet_wifi_session_wait(kismet_wifi_session_t *session, uint32_t timeout_ms);
 esp_err_t kismet_wifi_session_get_result(const kismet_wifi_session_t *session,
                                          kismet_wifi_session_result_t *out_result);
+
+/*
+ * Release a session.
+ *
+ * Teardown is bounded: it waits a finite time for the session task to exit. If the
+ * task does not exit in time the session is deliberately NOT freed, because that
+ * task still references it, and this returns without freeing. A caller that must
+ * know whether teardown completed - in particular before reading evidence the
+ * session's callbacks may still be writing - should use the _checked form.
+ */
 void kismet_wifi_session_destroy(kismet_wifi_session_t *session);
+
+/*
+ * As kismet_wifi_session_destroy(), but reports whether teardown completed.
+ *
+ * Returns ESP_ERR_TIMEOUT when the session task did not exit within the bound. In
+ * that case nothing is freed and the session stays active; the caller must treat
+ * its evidence as unusable rather than publishing it, and must not start another
+ * session expecting this one to be gone.
+ */
+esp_err_t kismet_wifi_session_destroy_checked(kismet_wifi_session_t *session);
 
 /* Tracker enumeration/get calls are intended after the mutating session has
  * completed (or otherwise under application-owned serialization). */

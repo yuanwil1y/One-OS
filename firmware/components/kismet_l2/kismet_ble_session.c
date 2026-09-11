@@ -21,6 +21,15 @@
 #define BLE_SYNC_TIMEOUT_MS 5000u
 #define BLE_STOP_GRACE_MS 2000u
 
+/*
+ * Bound on how long session teardown waits for the session task.
+ *
+ * Generous compared with the bounded scan loop, because nimble_port_stop() has to
+ * let the host task unwind. This bound is what keeps a wedged native call from
+ * becoming an unbounded application wait.
+ */
+#define KISMET_BLE_DESTROY_TIMEOUT_MS 15000u
+
 struct kismet_ble_session {
     kismet_ble_session_config_t cfg;
     kismet_ble_tracker_t *tracker;
@@ -341,10 +350,35 @@ esp_err_t kismet_ble_session_get_result(const kismet_ble_session_t *s,
 
 void kismet_ble_session_destroy(kismet_ble_session_t *s)
 {
-    if (!s) return;
+    (void)kismet_ble_session_destroy_checked(s);
+}
+
+esp_err_t kismet_ble_session_destroy_checked(kismet_ble_session_t *s)
+{
+    if (!s) return ESP_ERR_INVALID_ARG;
     if (!s->finished) {
         s->cancel = true;
-        (void)xSemaphoreTake(s->done, portMAX_DELAY);
+        /*
+         * Bounded wait, deliberately not portMAX_DELAY.
+         *
+         * The task's own loop is bounded (scan duration plus a grace window) and
+         * always reaches its cleanup block, but the native teardown it runs -
+         * nimble_port_stop() waits for the host task, then nimble_port_deinit() -
+         * is outside this component's control and can in principle block. Waiting
+         * forever would remove the operation's timeout guarantee.
+         *
+         * If the task does not finish in time we must NOT free: it still holds
+         * pointers into this session, its queue and its semaphores, so the session
+         * is intentionally leaked and the caller is told so it can fail the
+         * operation instead of publishing evidence from a session it could not
+         * shut down.
+         */
+        if (xSemaphoreTake(s->done, pdMS_TO_TICKS(KISMET_BLE_DESTROY_TIMEOUT_MS)) != pdTRUE) {
+            /* Every allocation is left in place on purpose. */
+            return ESP_ERR_TIMEOUT;
+        }
+        xSemaphoreGive(s->done);
     }
     free_session(s);
+    return ESP_OK;
 }

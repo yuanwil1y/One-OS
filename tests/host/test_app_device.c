@@ -309,6 +309,14 @@ static void test_repeat_materialize_does_not_grow(void)
  */
 #define SCAN_NO_STAGE APP_STAGE_COUNT
 
+/*
+ * Build a scan report where every stage is SKIPPED except those named.
+ *
+ * The sweep only treats absence as evidence for a protocol whose stage reached
+ * DONE, so tests must state exactly which stages completed - and with which
+ * outcome. A helper that silently marked stages DONE would hide the very
+ * distinction these tests exist to check.
+ */
 static app_scan_status_t scan_report_with(app_scan_stage_t a, app_scan_stage_t b)
 {
     app_scan_status_t scan;
@@ -323,6 +331,30 @@ static app_scan_status_t scan_report_with(app_scan_stage_t a, app_scan_stage_t b
     }
     if ((int)b >= 0 && (int)b < (int)APP_STAGE_COUNT) {
         scan.states[b] = APP_STAGE_STATE_DONE;
+    }
+    return scan;
+}
+
+/* Build a report from an explicit per-stage state map. */
+static app_scan_status_t scan_report_states(const app_stage_state_t *states)
+{
+    app_scan_status_t scan;
+
+    memset(&scan, 0, sizeof(scan));
+    for (int i = 0; i < (int)APP_STAGE_COUNT; ++i) {
+        scan.states[i] = states[i];
+    }
+    return scan;
+}
+
+/* All stages SKIPPED. */
+static app_scan_status_t scan_report_none(void)
+{
+    app_scan_status_t scan;
+
+    memset(&scan, 0, sizeof(scan));
+    for (int i = 0; i < (int)APP_STAGE_COUNT; ++i) {
+        scan.states[i] = APP_STAGE_STATE_SKIPPED;
     }
     return scan;
 }
@@ -681,6 +713,213 @@ static void test_control_is_not_wired(void)
     }
 }
 
+/* ---------------- partial coverage and multi-source freshness ---------------- */
+
+/*
+ * PARTIAL means the protocol was not fully observed, so a missing device proves
+ * nothing. Only DONE may sweep.
+ */
+static void test_partial_coverage_does_not_sweep(void)
+{
+    app_scan_evidence_t ev;
+    const uint8_t mac[6] = {0x80, 0, 0, 0, 0, 0x01};
+    bool truncated = false;
+    app_scan_status_t scan;
+
+    app_device_table_reset();
+
+    /* Generation 1: Wi-Fi fully covered, device found. */
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 1u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 1u, "device present after a full scan");
+
+    /* Generation 2: Wi-Fi stage ran but only partially covered its protocol, and
+     * did not report the device. A partial scan may simply have missed it. */
+    app_scan_evidence_reset(&ev, 2u);
+    app_device_generation_begin(2u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_none();
+    scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
+    scan.generation = 2u;
+    app_device_generation_finish(&scan);
+
+    CHECK(app_device_count() == 1u,
+          "PARTIAL coverage must NOT sweep: got %u devices",
+          (unsigned)app_device_count());
+    {
+        const app_device_binding_t *b = app_device_find("wifi_800000000001");
+        CHECK(b != NULL && b->availability == APP_AVAILABILITY_STALE,
+              "kept device is STALE, got %s",
+              b ? app_availability_name(b->availability) : "absent");
+    }
+
+    /* Generation 3: this time Wi-Fi completed and still did not see it, so now
+     * the absence is real evidence. */
+    app_scan_evidence_reset(&ev, 3u);
+    app_device_generation_begin(3u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 3u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 0u,
+          "DONE coverage with the device missing does sweep, got %u",
+          (unsigned)app_device_count());
+}
+
+/*
+ * A single missed RF report must not delete a device whose protocol was fully
+ * covered in one run but where the stage reported PARTIAL for another reason.
+ * This is the "one-off RF miss" case: a device can legitimately not appear in one
+ * pass, so only complete coverage may remove it.
+ */
+static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
+{
+    app_scan_evidence_t ev;
+    const uint8_t mac[6] = {0x81, 0, 0, 0, 0, 0x01};
+    bool truncated = false;
+    app_scan_status_t scan;
+
+    app_device_table_reset();
+
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 1u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 1u, "device seen in the first pass");
+
+    /* A pass where Wi-Fi ran incompletely and missed it: keep it. */
+    app_scan_evidence_reset(&ev, 2u);
+    app_device_generation_begin(2u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_none();
+    scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
+    scan.generation = 2u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 1u, "survives the incomplete pass");
+
+    /* It comes back: still one device, and now online again. */
+    app_scan_evidence_reset(&ev, 3u);
+    app_device_generation_begin(3u);
+    feed_wifi(&ev, mac, "AP", -52, 1u, 300u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
+    scan.generation = 3u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 1u, "reappearance does not duplicate");
+    {
+        const app_device_binding_t *b = app_device_find("wifi_810000000001");
+        CHECK(b != NULL && b->availability == APP_AVAILABILITY_ONLINE,
+              "back online after reappearing");
+    }
+}
+
+/*
+ * A device observed by two protocols must keep its evidence when only one of them
+ * reports it. The other source going quiet may not erase the fresh one.
+ */
+static void test_multi_source_one_missing_one_present(void)
+{
+    app_scan_evidence_t ev;
+    const uint8_t wifi_mac[6] = {0x82, 0, 0, 0, 0, 0x01};
+    const uint8_t ble_addr[6] = {0x82, 0, 0, 0, 0, 0x02};
+    bool truncated = false;
+    app_scan_status_t scan;
+    const app_device_binding_t *ble_dev;
+
+    app_device_table_reset();
+
+    /* Generation 1: both sources report their own devices. */
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_wifi(&ev, wifi_mac, "AP", -50, 1u, 100u);
+    feed_ble(&ev, ble_addr, 0u, "Sensor", -60, false, 0, 100u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
+    scan.generation = 1u;
+    app_device_generation_finish(&scan);
+    CHECK(app_device_count() == 2u, "two devices after generation 1");
+
+    /* Generation 2: BLE reports its sensor again; Wi-Fi completes but does not
+     * report its AP. Wi-Fi coverage is complete, so the AP is genuinely gone -
+     * but the BLE device must be untouched and online. */
+    app_scan_evidence_reset(&ev, 2u);
+    app_device_generation_begin(2u);
+    feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
+    scan.generation = 2u;
+    app_device_generation_finish(&scan);
+
+    CHECK(app_device_find("wifi_820000000001") == NULL,
+          "the fully covered but absent Wi-Fi device is swept");
+    ble_dev = app_device_find("ble_00820000000002");
+    CHECK(ble_dev != NULL, "the still-reported BLE device survives");
+    CHECK(ble_dev != NULL && ble_dev->availability == APP_AVAILABILITY_ONLINE,
+          "the still-reported BLE device is ONLINE, got %s",
+          ble_dev ? app_availability_name(ble_dev->availability) : "absent");
+
+    /* Generation 3: the reverse. BLE completes and misses the sensor; Wi-Fi is
+     * only PARTIAL. The BLE device is swept because its own protocol completed,
+     * while a Wi-Fi device (if any) would have been protected by the partial
+     * coverage. */
+    app_scan_evidence_reset(&ev, 3u);
+    app_device_generation_begin(3u);
+    (void)app_device_materialize(&ev, &truncated);
+    scan = scan_report_none();
+    scan.states[APP_STAGE_BLE_RF] = APP_STAGE_STATE_DONE;
+    scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
+    scan.generation = 3u;
+    app_device_generation_finish(&scan);
+
+    CHECK(app_device_find("ble_00820000000002") == NULL,
+          "a device whose own protocol completed and missed it is swept");
+}
+
+/*
+ * A device that was never successfully observed is UNAVAILABLE rather than
+ * STALE, so the two unavailable states stay distinguishable.
+ */
+static void test_never_observed_device_is_unavailable_not_stale(void)
+{
+    app_scan_evidence_t ev;
+    const uint8_t mac[6] = {0x83, 0, 0, 0, 0, 0x01};
+    bool truncated = false;
+    app_scan_status_t scan;
+    const app_device_binding_t *b;
+
+    app_device_table_reset();
+
+    /* Materialise without finishing: last_generation is set by the upsert, so
+     * simulate the not-yet-observed case by finishing a generation in which the
+     * stage was skipped entirely. */
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
+    (void)app_device_materialize(&ev, &truncated);
+
+    /* Begin a new generation without materialising anything, then finish with
+     * every stage skipped. Coverage is incomplete, so nothing is swept. */
+    app_scan_evidence_reset(&ev, 2u);
+    app_device_generation_begin(2u);
+    scan = scan_report_none();
+    scan.generation = 2u;
+    app_device_generation_finish(&scan);
+
+    b = app_device_find("wifi_830000000001");
+    CHECK(b != NULL, "device kept");
+    CHECK(b != NULL && b->availability == APP_AVAILABILITY_STALE,
+          "a device with a previous generation is STALE, got %s",
+          b ? app_availability_name(b->availability) : "absent");
+}
+
 int main(void)
 {
     test_unknown_wifi_device_kept_and_read_only();
@@ -693,6 +932,10 @@ int main(void)
     test_generation_sweeps_unseen_ephemeral();
     test_unrun_protocol_does_not_sweep_its_devices();
     test_canceled_and_failed_stages_do_not_sweep();
+    test_partial_coverage_does_not_sweep();
+    test_single_rf_miss_with_full_coverage_sweeps_only_once();
+    test_multi_source_one_missing_one_present();
+    test_never_observed_device_is_unavailable_not_stale();
     test_stale_devices_do_not_accumulate_over_many_generations();
     test_lan_device_uses_hostname_and_ip();
     test_capacity_overflow_is_reported();
