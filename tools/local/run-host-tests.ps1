@@ -266,6 +266,20 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\test_app_device_db.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
         }
+        'app_db_import' {
+            # app_recognition.c is here for app_db_state_name(); it needs the two L2
+            # lookup doubles, exactly as the app_device group does.
+            # No -D: the group resolves the fixture path from its own __FILE__ when
+            # DEVICE_DB_FIXTURE_DIR is not defined. CI passes it explicitly.
+            Build-And-Run 'app_db_import' @(
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_db_import.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_db_import.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
+        }
         'device_db_python' {
             Invoke-Step 'regenerate fixture' $py @((Join-Path $Root 'tools\device_db\build_device_db.py'))
             Invoke-Step 'regenerate invalid variants' $py @((Join-Path $Root 'tools\device_db\make_invalid_fixtures.py'))

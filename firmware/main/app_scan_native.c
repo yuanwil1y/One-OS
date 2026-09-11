@@ -330,6 +330,15 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
     kismet_wifi_tracker_stats_t tracker_stats;
     bool was_started = false;
     bool was_connected = false;
+    /*
+     * Declared with the other locals, not next to the wait below.
+     *
+     * The failure paths `goto restore` before that point, and the restore block
+     * reads this. Declaring it later would leave a jump over its initialisation,
+     * which GCC reports as `-Werror=maybe-uninitialized` on the target build even
+     * though every path that reaches the label assigns it.
+     */
+    bool stopped = false;
     esp_err_t err;
 
     if (ev == NULL) {
@@ -648,6 +657,10 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
     kismet_ble_tracker_config_t tracker_cfg;
     kismet_ble_session_config_t session_cfg;
     kismet_ble_session_result_t result;
+    /* Declared with the other locals; this function returns rather than jumping,
+     * but keeping the two RF stages shaped the same way makes the difference
+     * visible instead of accidental. */
+    bool stopped = false;
     esp_err_t err;
 
     if (ev == NULL) {
@@ -716,7 +729,6 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
         (void)kismet_ble_session_cancel(session);
     }
 
-    bool stopped = false;
     err = kismet_ble_session_wait(session, cfg.ble_duration_ms + 5000u);
     if (err == ESP_OK) {
         stopped = true;

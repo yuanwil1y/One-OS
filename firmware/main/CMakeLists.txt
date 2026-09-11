@@ -22,6 +22,7 @@ idf_component_register(
         freertos
         esp_timer
         esp_driver_uart
+        esp_driver_sdspi
         esp_app_format
         esp_wifi
         esp_event
