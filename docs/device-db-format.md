@@ -273,6 +273,33 @@ service/manufacturer bytes as hex for BLE payloads). The firmware compares
 `key_hash` first and only then the key bytes, so a hash collision cannot cause a
 false match.
 
+### 5.4.1 Key normalisation is part of the contract
+
+`key_string` stores the **human-readable declaration** (for example
+`Example|Plug-ZB-2` or `_ipp._tcp.local`), but `key_hash` covers the **canonical
+form**:
+
+```text
+canonical(key) = lowercase( trim(key) ) with all ':' and '-' removed
+```
+
+So `AA:BB:CC:DD:EE:FF`, `aa-bb-cc-dd-ee-ff` and `aabbccddeeff` all hash
+identically. This rule must be applied identically by the generator, the firmware
+reader and the host validator; if any of the three hashes the raw bytes instead,
+a valid file is reported as corrupt.
+
+Both spellings are therefore stored on purpose:
+
+- `key_string` stays readable, so a human reading a hex dump or a diagnostics
+  screen can tell what the fingerprint is;
+- `key_hash` stays comparable, so matching is a single integer compare.
+
+The reader re-derives `key_hash` from `key_string` during validation and rejects
+the file if they disagree, which is what makes the pair self-checking.
+
+`DEVICE_DB_CANONICAL_KEY_HASH` in `device_db_format.h` is the reference
+implementation of this rule.
+
 ### 5.5 Entity recipe record (72 bytes)
 
 | Offset | Size | Field |

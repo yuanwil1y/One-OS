@@ -220,8 +220,8 @@ static void test_valid_fixture(void)
         CHECK(fa.protocol == DEVICE_DB_PROTO_BLE, "1001 fingerprint is BLE");
         CHECK(string_equals(fa.key, "181c"), "1001 key, got '%.*s'",
               (int)fa.key.length, fa.key.data);
-        CHECK(fa.key_hash == device_db_key_hash(fa.key.data, fa.key.length),
-              "fingerprint key_hash must match the key it names");
+        CHECK(fa.key_hash == device_db_canonical_key_hash(fa.key.data, fa.key.length),
+              "fingerprint key_hash must match the canonical key it names");
     }
 
     /* The distinct model has a different key so it can never merge with 1001. */
@@ -291,7 +291,7 @@ static void test_valid_fixture(void)
         uint32_t indices[8];
         uint32_t count = 0u;
         bool incomplete = false;
-        uint32_t hash = device_db_key_hash(key, sizeof(key) - 1u);
+        uint32_t hash = device_db_canonical_key_hash(key, sizeof(key) - 1u);
         bool found = false;
 
         CHECK(device_db_index_lookup(&db, DEVICE_DB_PROTO_BLE, hash, indices, 8u,
@@ -478,6 +478,35 @@ static void test_format_constants(void)
     /* FNV-1a 32 of the empty string is the offset basis. */
     CHECK(device_db_key_hash((const uint8_t *)"", 0u) == 2166136261u,
           "FNV-1a offset basis");
+
+    /*
+     * Canonical key normalisation is part of the format contract: the generator,
+     * this reader and the host validator must fold keys identically, or a valid
+     * file looks corrupt. These cases pin the rule.
+     */
+    {
+        /* Vector cross-checked against tools/device_db/nbdb.py normalize_key():
+         * '  Example|Plug-ZB-2  ' folds to 'example|plugzb2'. */
+        const uint8_t raw[] = "  Example|Plug-ZB-2  ";
+        const uint8_t folded[] = "example|plugzb2";
+
+        CHECK(device_db_canonical_key_hash(raw, sizeof(raw) - 1u) ==
+                  device_db_key_hash(folded, sizeof(folded) - 1u),
+              "canonical hash must trim, lowercase and drop ':' and '-'");
+        /* Already-canonical input must be unchanged. */
+        CHECK(device_db_canonical_key_hash(folded, sizeof(folded) - 1u) ==
+                  device_db_key_hash(folded, sizeof(folded) - 1u),
+              "canonical hash of canonical input is idempotent");
+        /* A MAC-style key folds identically however it is punctuated. */
+        {
+            const uint8_t a[] = "AA:BB:CC:DD:EE:FF";
+            const uint8_t b[] = "aabbccddeeff";
+            CHECK(device_db_canonical_key_hash(a, sizeof(a) - 1u) ==
+                      device_db_key_hash(b, sizeof(b) - 1u),
+                  "punctuated and plain addresses must fold to the same hash");
+        }
+        CHECK(device_db_canonical_key_hash(NULL, 0u) == 0u, "null key is rejected");
+    }
 }
 
 int main(void)

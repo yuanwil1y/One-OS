@@ -86,6 +86,42 @@ uint32_t device_db_key_hash(const uint8_t *data, size_t length)
     return hash;
 }
 
+uint32_t device_db_canonical_key_hash(const uint8_t *data, size_t length)
+{
+    uint32_t hash = 2166136261u; /* FNV-1a 32 */
+    size_t begin = 0u;
+    size_t end = length;
+
+    if (data == NULL) {
+        return 0u;
+    }
+
+    /* Trim leading and trailing ASCII whitespace, then fold to lowercase and
+     * drop ':' and '-' separators. This mirrors normalize_key() in
+     * tools/device_db/nbdb.py exactly; the two must not drift. */
+    while (begin < end && (data[begin] == ' ' || data[begin] == '\t' ||
+                           data[begin] == '\r' || data[begin] == '\n')) {
+        ++begin;
+    }
+    while (end > begin && (data[end - 1u] == ' ' || data[end - 1u] == '\t' ||
+                           data[end - 1u] == '\r' || data[end - 1u] == '\n')) {
+        --end;
+    }
+
+    for (size_t i = begin; i < end; ++i) {
+        uint8_t c = data[i];
+        if (c == ':' || c == '-') {
+            continue;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            c = (uint8_t)(c - 'A' + 'a');
+        }
+        hash ^= (uint32_t)c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 /* ---------------- validation helpers ---------------- */
 
 #define FAIL(status, reason)                                                  \
@@ -520,9 +556,12 @@ device_db_status_t device_db_open(const uint8_t *bytes, uint32_t size,
         if (match_kind == 2u && mask_length != mask.length) {
             FAIL(DEVICE_DB_ERR_CORRUPT, "fingerprint mask_length disagrees with mask");
         }
-        /* The stored hash must be the hash of the stored key, otherwise a reader
-         * would compare a hash that can never match the record it names. */
-        if (device_db_key_hash(key.data, key.length) != key_hash) {
+        /* The stored hash must be the canonical hash of the stored key, otherwise
+         * a reader would compare a hash that can never match the record it
+         * names. Note this is the CANONICAL form, not the raw bytes: the key is
+         * stored human-readable ("example|plug-zb-2") while the hash covers the
+         * normalised form. */
+        if (device_db_canonical_key_hash(key.data, key.length) != key_hash) {
             FAIL(DEVICE_DB_ERR_CORRUPT, "fingerprint key_hash does not match its key");
         }
     }

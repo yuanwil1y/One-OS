@@ -270,6 +270,20 @@ const char *device_db_status_detail(void);
 uint32_t device_db_key_hash(const uint8_t *data, size_t length);
 
 /*
+ * Canonical fingerprint key hash.
+ *
+ * The record stores the human-readable key declaration, but `key_hash` covers the
+ * CANONICAL form: trimmed, lowercased, with ':' and '-' separators removed. That
+ * rule is part of the format contract, not an implementation detail, because the
+ * generator, this reader and the host validator must all agree or a valid file
+ * looks corrupt.
+ *
+ * Use this function rather than device_db_key_hash() when checking or producing a
+ * fingerprint key_hash.
+ */
+uint32_t device_db_canonical_key_hash(const uint8_t *data, size_t length);
+
+/*
  * CRC-32 (IEEE 802.3, reflected, init 0xFFFFFFFF, final xor 0xFFFFFFFF).
  *
  * Exposed because it is part of the format contract: the generator and the host
