@@ -287,6 +287,19 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\test_app_portal.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
         }
+        'app_provision' {
+            Build-And-Run 'app_provision' @(
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_db_import.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_portal.c'),
+                (Join-Path $m 'app_provision.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_provision.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
+        }
         'device_db_python' {
             Invoke-Step 'regenerate fixture' $py @((Join-Path $Root 'tools\device_db\build_device_db.py'))
             Invoke-Step 'regenerate invalid variants' $py @((Join-Path $Root 'tools\device_db\make_invalid_fixtures.py'))

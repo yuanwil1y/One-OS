@@ -11,6 +11,7 @@ idf_component_register(
         "app_device_db_sd.c"
         "app_db_import.c"
         "app_portal.c"
+        "app_provision.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"
