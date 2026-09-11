@@ -1,11 +1,19 @@
 idf_component_register(
-    SRCS "main.c"
-    INCLUDE_DIRS "."
+    SRCS
+        "main.c"
+        "app_ops.c"
+        "app_diag_protocol.c"
+        "app_runtime.c"
+        "app_diag_console.c"
+    INCLUDE_DIRS "." "include"
     REQUIRES
         board
         lvgl_port
         lvgl
         freertos
+        esp_timer
+        esp_driver_uart
+        esp_app_format
         ha_core
         ha_discovery_l2
         esphome_l2
