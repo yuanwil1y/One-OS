@@ -19,7 +19,17 @@
 typedef struct {
     app_device_binding_t value;
     bool in_use;
-    bool seen_this_generation;
+    /*
+     * Per-source sighting flags for the current generation.
+     *
+     * Deliberately one flag per source rather than a single "seen" bit. A device
+     * can be observed by Wi-Fi and BLE; if BLE reports it and Wi-Fi does not, the
+     * device is still online and only the BLE side is fresh. Collapsing this into
+     * one flag would let one source's silence hide another source's evidence.
+     */
+    bool seen_wifi;
+    bool seen_ble;
+    bool seen_lan;
 } device_slot_t;
 
 typedef struct {
@@ -263,7 +273,9 @@ void app_device_generation_begin(uint32_t generation)
     s_generation = generation;
     for (size_t i = 0u; i < APP_DEVICE_MAX; ++i) {
         if (s_devices[i].in_use) {
-            s_devices[i].seen_this_generation = false;
+            s_devices[i].seen_wifi = false;
+            s_devices[i].seen_ble = false;
+            s_devices[i].seen_lan = false;
         }
     }
 }
@@ -277,74 +289,104 @@ bool app_scan_stage_was_observed(const app_scan_status_t *scan,
     if ((int)stage < 0 || (int)stage >= (int)APP_STAGE_COUNT) {
         return false;
     }
-    /* "Observed" means the stage ran to a state in which it could actually have
-     * seen its protocol. SKIPPED, FAILED and CANCELED all mean it did not look,
-     * so the absence of a device in the results proves nothing. */
-    switch (scan->states[stage]) {
-    case APP_STAGE_STATE_DONE:
-    case APP_STAGE_STATE_PARTIAL:
-        return true;
-    default:
-        return false;
-    }
+    /* "Observed" means the stage covered its protocol well enough that a missing
+     * device is evidence. That is stricter than "the stage reported success":
+     * PARTIAL does not qualify, because a partially covered protocol may simply
+     * have missed the device. See app_scan_state_covers_protocol(). */
+    return app_scan_state_covers_protocol(scan->states[stage]);
 }
 
 /*
- * Map a binding's source protocols onto the stages that observe them.
+ * Was every protocol that has observed this device covered well enough this
+ * generation that its absence is meaningful evidence?
  *
- * A device is only swept when at least one of its sources actually ran and did
- * not report it again. If every source was skipped or failed, absence of
- * evidence says nothing about the device.
+ * Both conditions are required:
+ *
+ *   1. NO source may have been observed without reporting the device. A source
+ *      that ran and did not see it is direct evidence that it was not there.
+ *   2. EVERY source must have fully covered its protocol. A source whose stage
+ *      was skipped, cancelled, failed or merely PARTIAL may simply have missed
+ *      the device, so its silence proves nothing. PARTIAL is deliberately not
+ *      treated as coverage: "the stage finished" is not "we would have seen it".
+ *
+ * A device with no recorded sources is never swept.
  */
-static bool device_source_was_observed(const device_slot_t *slot,
-                                       const app_scan_status_t *scan)
+static bool device_all_sources_fully_covered(const device_slot_t *slot,
+                                             const app_scan_status_t *scan)
 {
-    if (scan == NULL) {
+    bool any = false;
+
+    if (scan == NULL || slot->value.sources == 0u) {
         return false;
     }
-    if ((slot->value.sources & APP_SOURCE_WIFI) != 0u &&
-        app_scan_stage_was_observed(scan, APP_STAGE_WIFI_RF)) {
-        return true;
+
+    if ((slot->value.sources & APP_SOURCE_WIFI) != 0u) {
+        any = true;
+        if (slot->seen_wifi ||
+            !app_scan_state_covers_protocol(scan->states[APP_STAGE_WIFI_RF])) {
+            return false;
+        }
     }
-    if ((slot->value.sources & APP_SOURCE_BLE) != 0u &&
-        app_scan_stage_was_observed(scan, APP_STAGE_BLE_RF)) {
-        return true;
+    if ((slot->value.sources & APP_SOURCE_BLE) != 0u) {
+        any = true;
+        if (slot->seen_ble ||
+            !app_scan_state_covers_protocol(scan->states[APP_STAGE_BLE_RF])) {
+            return false;
+        }
     }
-    if ((slot->value.sources & APP_SOURCE_LAN) != 0u &&
-        (app_scan_stage_was_observed(scan, APP_STAGE_MDNS) ||
-         app_scan_stage_was_observed(scan, APP_STAGE_SSDP) ||
-         app_scan_stage_was_observed(scan, APP_STAGE_LAN_HOSTS))) {
-        return true;
+    if ((slot->value.sources & APP_SOURCE_LAN) != 0u) {
+        /* LAN evidence can arrive from any of three stages, so the device is only
+         * accounted for when none of them saw it and at least one of them fully
+         * covered its protocol. */
+        any = true;
+        if (slot->seen_lan ||
+            !(app_scan_state_covers_protocol(scan->states[APP_STAGE_MDNS]) ||
+              app_scan_state_covers_protocol(scan->states[APP_STAGE_SSDP]) ||
+              app_scan_state_covers_protocol(scan->states[APP_STAGE_LAN_HOSTS]))) {
+            return false;
+        }
     }
-    return false;
+
+    return any;
 }
 
 void app_device_generation_finish(const app_scan_status_t *scan)
 {
     for (size_t i = 0u; i < APP_DEVICE_MAX; ++i) {
         device_slot_t *slot = &s_devices[i];
+        bool seen_by_any;
 
         if (!slot->in_use) {
             continue;
         }
-        if (slot->seen_this_generation) {
+
+        /* Availability is per device and derived from per-source freshness: if
+         * any source still reports it, the device is online even when another
+         * source has gone quiet. */
+        seen_by_any = slot->seen_wifi || slot->seen_ble || slot->seen_lan;
+        if (seen_by_any) {
             slot->value.availability = APP_AVAILABILITY_ONLINE;
             slot->value.last_generation = s_generation;
             continue;
         }
 
-        /* Not observed in this generation. Decide whether that means anything. */
-        if (slot->value.ephemeral && device_source_was_observed(slot, scan)) {
-            /* The protocol ran and did not report it: it is really gone. */
+        /*
+         * Not observed by any source this generation. Absence is only evidence
+         * when every source that has observed this device was fully covered;
+         * otherwise keep the device and mark it unavailable, so a partial scan
+         * cannot make devices disappear.
+         */
+        if (slot->value.ephemeral && device_all_sources_fully_covered(slot, scan)) {
             entity_slot_free_for_device(slot->value.device_id);
             (void)ha_core_device_remove(slot->value.ha_device_id);
             memset(slot, 0, sizeof(*slot));
             s_swept++;
         } else {
-            /* Either a persistent identity, or no protocol that could have seen
-             * it actually ran. Keep it and mark it stale so the user still sees
-             * the device instead of losing it to a partial scan. */
-            slot->value.availability = APP_AVAILABILITY_STALE;
+            /* Persistent identity, or incomplete coverage. Which unavailable
+             * state is used depends on whether we ever did observe it. */
+            slot->value.availability = (slot->value.last_generation != 0u)
+                                           ? APP_AVAILABILITY_STALE
+                                           : APP_AVAILABILITY_UNAVAILABLE;
         }
     }
 }
@@ -475,7 +517,17 @@ static device_slot_t *device_upsert(const char *device_id,
 
     slot->value.sources |= source_bit;
     slot->value.last_generation = s_generation;
-    slot->seen_this_generation = true;
+    /* Record freshness for the source that actually reported it, so one source's
+     * later silence cannot erase another source's evidence. */
+    if ((source_bit & APP_SOURCE_WIFI) != 0u) {
+        slot->seen_wifi = true;
+    }
+    if ((source_bit & APP_SOURCE_BLE) != 0u) {
+        slot->seen_ble = true;
+    }
+    if ((source_bit & APP_SOURCE_LAN) != 0u) {
+        slot->seen_lan = true;
+    }
     slot->value.availability = APP_AVAILABILITY_ONLINE;
     if (seen_ms >= slot->value.last_seen_ms) {
         slot->value.last_seen_ms = seen_ms;

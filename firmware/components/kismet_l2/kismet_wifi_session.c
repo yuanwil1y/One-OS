@@ -14,6 +14,16 @@
 #define WIFI_MIN_COPY 30u
 #define WIFI_FCS_LEN 4u
 
+/*
+ * Bound on how long session teardown waits for the session task.
+ *
+ * The task's own loop is bounded by cfg.duration_ms and always runs its cleanup
+ * block, but the native teardown it calls is outside this component's control.
+ * This bound is what keeps a wedged native call from turning into an unbounded
+ * application wait.
+ */
+#define KISMET_WIFI_DESTROY_TIMEOUT_MS 15000u
+
 struct kismet_wifi_session {
     kismet_wifi_session_config_t cfg;
     kismet_wifi_tracker_t *tracker;
@@ -302,6 +312,11 @@ esp_err_t kismet_wifi_session_wait(kismet_wifi_session_t *s, uint32_t timeout_ms
     return ESP_OK;
 }
 
+void kismet_wifi_session_destroy(kismet_wifi_session_t *s)
+{
+    (void)kismet_wifi_session_destroy_checked(s);
+}
+
 esp_err_t kismet_wifi_session_get_result(const kismet_wifi_session_t *s,
                                          kismet_wifi_session_result_t *out)
 {
@@ -310,14 +325,36 @@ esp_err_t kismet_wifi_session_get_result(const kismet_wifi_session_t *s,
     return ESP_OK;
 }
 
-void kismet_wifi_session_destroy(kismet_wifi_session_t *s)
+esp_err_t kismet_wifi_session_destroy_checked(kismet_wifi_session_t *s)
 {
-    if (!s) return;
+    if (!s) return ESP_ERR_INVALID_ARG;
     if (!s->finished) {
         s->cancel = true;
-        (void)xSemaphoreTake(s->done, portMAX_DELAY);
+        /*
+         * Bounded wait, deliberately not portMAX_DELAY.
+         *
+         * The session task always reaches its completion point on the paths this
+         * component controls (normal end, cancel, or its own duration), but the
+         * native teardown it performs - esp_wifi_stop(), esp_wifi_deinit() - is
+         * outside our control and can in principle block. Waiting forever would
+         * remove the operation's timeout guarantee, so the wait is finite.
+         *
+         * If the task does NOT finish in time we must NOT free: it still holds
+         * pointers into this session, its queue and its semaphore, so freeing
+         * would be a use-after-free in another task's stack. The session is
+         * intentionally leaked instead and the caller is told, so it can fail the
+         * operation rather than publish evidence from a session it cannot shut
+         * down. Leaking one small session is strictly better than corrupting
+         * memory or hanging the application forever.
+         */
+        if (xSemaphoreTake(s->done, pdMS_TO_TICKS(KISMET_WIFI_DESTROY_TIMEOUT_MS)) != pdTRUE) {
+            /* Every allocation is left in place on purpose. */
+            return ESP_ERR_TIMEOUT;
+        }
+        xSemaphoreGive(s->done);
     }
     vQueueDelete(s->queue);
     vSemaphoreDelete(s->done);
     free(s);
+    return ESP_OK;
 }

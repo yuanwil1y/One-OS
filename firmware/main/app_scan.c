@@ -57,6 +57,75 @@ static size_t oldest_lan_index(const app_scan_evidence_t *ev)
     return oldest;
 }
 
+/* ---------------- RF stage verdict ---------------- */
+
+app_scan_rf_verdict_t app_scan_evaluate_rf_stage(const app_scan_rf_outcome_t *outcome)
+{
+    app_scan_rf_verdict_t verdict;
+
+    memset(&verdict, 0, sizeof(verdict));
+
+    if (outcome == NULL) {
+        verdict.terminal_state = APP_STAGE_STATE_FAILED;
+        verdict.evidence_usable = false;
+        verdict.reason = "no_outcome";
+        return verdict;
+    }
+
+    /*
+     * Teardown first. If the session could not be shut down, its task may still
+     * be writing the evidence store, so nothing about this stage can be trusted -
+     * neither its evidence nor a claim that it covered the protocol.
+     */
+    if (!outcome->stop_confirmed) {
+        verdict.terminal_state = APP_STAGE_STATE_FAILED;
+        verdict.evidence_usable = false;
+        verdict.reason = "session_stop_unconfirmed";
+        return verdict;
+    }
+
+    /* The session is genuinely gone, so whatever it collected is safe to use. */
+    verdict.evidence_usable = true;
+
+    if (outcome->canceled) {
+        /* Cancellation is a normal bounded outcome, and it means coverage was
+         * truncated: the stage records that rather than pretending DONE. */
+        verdict.terminal_state = APP_STAGE_STATE_CANCELED;
+        verdict.reason = "canceled";
+        return verdict;
+    }
+
+    if (outcome->native_error != ESP_OK) {
+        /* Something was collected but the stage did not complete cleanly. With no
+         * evidence at all this is a failure rather than a thin result. */
+        verdict.terminal_state = outcome->collected > 0u ? APP_STAGE_STATE_PARTIAL
+                                                        : APP_STAGE_STATE_FAILED;
+        verdict.reason = "native_error";
+        return verdict;
+    }
+
+    if (outcome->timed_out) {
+        /* The stage ended on its own deadline. It may have collected plenty, but
+         * coverage is incomplete, so PARTIAL - never DONE. */
+        verdict.terminal_state = outcome->collected > 0u ? APP_STAGE_STATE_PARTIAL
+                                                        : APP_STAGE_STATE_FAILED;
+        verdict.reason = "stage_timeout";
+        return verdict;
+    }
+
+    verdict.terminal_state = APP_STAGE_STATE_DONE;
+    verdict.reason = NULL;
+    return verdict;
+}
+
+bool app_scan_state_covers_protocol(app_stage_state_t state)
+{
+    /* Only a stage that ran to completion can support the claim "if it were
+     * there, we would have seen it". PARTIAL, FAILED, SKIPPED and CANCELED all
+     * leave open the possibility that the protocol was not fully observed. */
+    return state == APP_STAGE_STATE_DONE;
+}
+
 /* ---------------- lifecycle ---------------- */
 
 void app_scan_evidence_reset(app_scan_evidence_t *ev, uint32_t generation)

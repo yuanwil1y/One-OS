@@ -454,6 +454,35 @@ static app_diag_error_t run_scan_stage(app_scan_stage_t stage,
         return APP_DIAG_ERR_NOT_IMPLEMENTED;
     }
 
+    /*
+     * The RF stages decide their own recorded state.
+     *
+     * A stage can return ESP_OK while having ended on its own deadline, or having
+     * failed to shut its session down; deriving DONE from the return code alone
+     * would let a partial scan look complete. The verdict computed by
+     * app_scan_evaluate_rf_stage() is therefore authoritative for those stages.
+     */
+    if (stage == APP_STAGE_WIFI_RF || stage == APP_STAGE_BLE_RF) {
+        const bool is_wifi = stage == APP_STAGE_WIFI_RF;
+        const bool verdict_set = is_wifi ? stats->wifi_verdict_set
+                                         : stats->ble_verdict_set;
+        const app_scan_rf_verdict_t verdict = is_wifi ? stats->wifi_verdict
+                                                      : stats->ble_verdict;
+
+        if (verdict_set) {
+            (void)app_ops_stage_end(&s_ops, stage, verdict.terminal_state);
+            switch (verdict.terminal_state) {
+            case APP_STAGE_STATE_DONE:
+            case APP_STAGE_STATE_PARTIAL:
+                return APP_DIAG_OK;
+            case APP_STAGE_STATE_CANCELED:
+                return APP_DIAG_ERR_CANCELED;
+            default:
+                return APP_DIAG_ERR_INTERNAL;
+            }
+        }
+    }
+
     if (err == ESP_OK) {
         (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_DONE);
         return APP_DIAG_OK;

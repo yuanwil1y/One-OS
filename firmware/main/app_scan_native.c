@@ -307,15 +307,14 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
     }
 
     /*
-     * 4. Destroy the session BEFORE reading the tracker.
+     * 4. Tear the session down BEFORE reading the tracker.
      *
-     * The session task is the only writer of the tracker, and destroy() blocks
-     * until that task has finished. Reading the tracker first would be a data
-     * race against a still-running session whenever the wait above timed out.
-     * The evidence store (`ev`) is likewise only safe to read here: it is written
-     * from the session's frame callback.
+     * destroy_checked() waits a bounded time for the session task to exit and
+     * reports whether it actually did. Only a confirmed stop makes the tracker
+     * and the evidence safe to read: that task is their only writer, so reading
+     * them after an unconfirmed stop is a data race.
      */
-    kismet_wifi_session_destroy(session);
+    stopped = kismet_wifi_session_destroy_checked(session) == ESP_OK;
     session = NULL;
 
     if (stopped) {
@@ -323,11 +322,10 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
         enrich_wifi_from_tracker(ev, tracker);
         (void)kismet_wifi_tracker_get_stats(tracker, &tracker_stats);
     } else {
-        /* The session never confirmed completion, so the tracker may be in an
-         * unknown state. Do not publish evidence we cannot vouch for; the frame
-         * callback may already have copied some of it, and the stage is reported
-         * as a failure by the native_error/timed-out path below. */
-        ESP_LOGW(TAG, "wifi evidence discarded: session did not confirm stop");
+        /* The session could not be shut down, so its task may still be running.
+         * No evidence is published and the stage is reported as failed rather
+         * than as a thin success. */
+        ESP_LOGE(TAG, "wifi session did not stop within the bound; discarding evidence");
         if (stats != NULL) {
             stats->wifi_native_error = ESP_ERR_TIMEOUT;
         }
@@ -335,6 +333,27 @@ esp_err_t app_scan_native_wifi_rf(app_scan_evidence_t *ev,
 
     kismet_wifi_tracker_destroy(tracker);
     tracker = NULL;
+
+    /*
+     * Reduce the outcome to a stage verdict through the host-tested policy, and
+     * hand it to the caller. A stage that timed out or could not be shut down must
+     * never be recorded as DONE, so the verdict travels with the result instead of
+     * the caller inferring "success" from a return code.
+     */
+    {
+        app_scan_rf_outcome_t outcome;
+
+        memset(&outcome, 0, sizeof(outcome));
+        outcome.stop_confirmed = stopped;
+        outcome.canceled = result.canceled;
+        outcome.timed_out = !stopped;
+        outcome.native_error = result.native_error;
+        outcome.collected = (uint32_t)ev->wifi_count;
+        if (stats != NULL) {
+            stats->wifi_verdict = app_scan_evaluate_rf_stage(&outcome);
+            stats->wifi_verdict_set = true;
+        }
+    }
 
     if (result.native_error != ESP_OK) {
         err = result.native_error;
@@ -517,17 +536,34 @@ esp_err_t app_scan_native_ble_rf(app_scan_evidence_t *ev,
         stats->frames_truncated += result.truncated_reports;
     }
 
-    /* Destroy first: destroy() blocks until the session task has finished, so
-     * this is the point after which the tracker and the report callback can no
-     * longer touch the evidence store. */
-    kismet_ble_session_destroy(session);
+    /*
+     * Tear down before publishing anything.
+     *
+     * destroy_checked() waits a bounded time for the session task to exit and
+     * reports whether it did. The report callback and the tracker are written from
+     * that task, so only a confirmed stop makes the evidence safe to use; without
+     * it the stage is FAILED with unusable evidence rather than a thin success.
+     */
+    stopped = kismet_ble_session_destroy_checked(session) == ESP_OK;
     kismet_ble_tracker_destroy(tracker);
 
+    {
+        app_scan_rf_outcome_t outcome;
+
+        memset(&outcome, 0, sizeof(outcome));
+        outcome.stop_confirmed = stopped;
+        outcome.canceled = result.canceled;
+        outcome.timed_out = !stopped;
+        outcome.native_error = result.native_error;
+        outcome.collected = (uint32_t)ev->ble_count;
+        if (stats != NULL) {
+            stats->ble_verdict = app_scan_evaluate_rf_stage(&outcome);
+            stats->ble_verdict_set = true;
+        }
+    }
+
     if (!stopped) {
-        /* A session that never confirmed stop may still have been mid-report; its
-         * evidence is not trustworthy, so the stage is reported as timed out
-         * rather than as a successful scan. */
-        ESP_LOGW(TAG, "ble session did not confirm stop; reporting timeout");
+        ESP_LOGE(TAG, "ble session did not stop within the bound; stage failed");
         return ESP_ERR_TIMEOUT;
     }
     return result.native_error;
@@ -829,21 +865,36 @@ esp_err_t app_scan_native_lan_services(app_scan_evidence_t *ev,
     /*
      * Service discovery for hosts the previous stage already found.
      *
-     * Scope is deliberately narrow, because this is the only stage that opens
-     * TCP connections to other people's devices:
+     * WHAT THIS ACTUALLY DOES ON THE NETWORK - stated precisely, because
+     * "passive" is a term of art and this stage is not passive in the RF sense:
      *
-     *   - only hosts that LAN_HOSTS already observed as up, capped at
-     *     SCAN_NMAP_MAX_HOSTS;
-     *   - a fixed, short port list of well-known management/service ports,
-     *     capped at SCAN_NMAP_MAX_PORTS;
-     *   - connect() probes and at most a bounded passive read, never a write and
-     *     never a guess at credentials;
-     *   - one shared deadline for both the port scan and the service scan, so the
-     *     whole stage is finite;
-     *   - cancellation is checked between the two halves.
+     *   - it performs an ACTIVE TCP connect() to each selected port. That is
+     *     observable traffic: the peer sees an inbound connection attempt, and so
+     *     does anything monitoring the path. It is therefore a "bounded local
+     *     host/service probe" under the product rules, not a passive observation
+     *     and not comparable to the Kismet RF stages.
+     *   - it does NOT send any protocol payload. The nmap component's
+     *     NMAP_SERVICE_PROBE_PASSIVE profile reads a bounded banner and never
+     *     calls send(); only NMAP_SERVICE_PROBE_HTTP_HEAD would, and that profile
+     *     is deliberately not requested here. So there is no HTTP request, no
+     *     credential attempt and no protocol-specific probe payload.
+     *   - the identification is therefore best-effort: a service that speaks only
+     *     after being prompted will stay unidentified, and that is accepted
+     *     rather than escalating to an active probe.
      *
-     * A host that yields no open port is not an error: it simply contributes no
-     * service evidence.
+     * Every bound the product requires is applied here:
+     *
+     *   - targets come only from hosts LAN_HOSTS already observed as up, capped at
+     *     SCAN_NMAP_MAX_HOSTS, with addresses parsed by the address parser rather
+     *     than by a printf format;
+     *   - a fixed, short list of well-known management/service ports, capped at
+     *     SCAN_NMAP_MAX_PORTS;
+     *   - a bounded capture per service, so a chatty peer cannot make us read
+     *     indefinitely;
+     *   - one shared deadline across the port and service halves, so the whole
+     *     stage is finite, with cancellation checked between the halves;
+     *   - a host with no open port is not an error, and having nothing to probe
+     *     returns success.
      */
     static const uint16_t k_probe_ports[SCAN_NMAP_MAX_PORTS] = {
         80u,   /* HTTP */

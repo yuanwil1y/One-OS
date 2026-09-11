@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "app_ops.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -143,6 +144,56 @@ typedef struct {
     app_stage_state_t terminal_state; /* PENDING means "run and decide later" */
     const char *reason;               /* stable short literal, never a secret */
 } app_scan_stage_plan_t;
+
+/*
+ * How an RF stage actually ended.
+ *
+ * `stop_confirmed` is the important one: it means session teardown really
+ * completed, so the session task can no longer be writing into the evidence
+ * store. A stage can hit its own bounded wait and still have stopped cleanly; a
+ * stage can also look finished while its session refuses to shut down. Those are
+ * different situations and must be reported differently.
+ */
+typedef struct {
+    bool stop_confirmed;
+    bool canceled;
+    bool timed_out;         /* the stage's own bounded wait expired */
+    esp_err_t native_error; /* ESP_OK when no native call failed */
+    uint32_t collected;     /* bounded evidence items ingested */
+} app_scan_rf_outcome_t;
+
+typedef struct {
+    app_stage_state_t terminal_state;
+    /* False means the evidence must NOT be published: the session could not be
+     * shut down, so its callbacks may still be mutating the store. */
+    bool evidence_usable;
+    const char *reason;
+} app_scan_rf_verdict_t;
+
+/*
+ * Decide the recorded state of an RF stage and whether its evidence may be used.
+ *
+ * Rules, in order:
+ *   - teardown not confirmed -> FAILED and evidence unusable. Reporting anything
+ *     else would publish data from a session we could not stop.
+ *   - canceled               -> CANCELED (a normal bounded outcome, not an error).
+ *   - native error           -> FAILED.
+ *   - timed out              -> PARTIAL when something was collected, else FAILED.
+ *     A timeout means coverage was incomplete, so it must never read as DONE.
+ *   - otherwise              -> DONE.
+ */
+app_scan_rf_verdict_t app_scan_evaluate_rf_stage(const app_scan_rf_outcome_t *outcome);
+
+/*
+ * Does an observed stage state mean the protocol was covered well enough that a
+ * device's absence is evidence it is gone?
+ *
+ * Only DONE qualifies. PARTIAL explicitly does not: a partially covered protocol
+ * may simply have missed a device, so absence proves nothing. This is what keeps
+ * a partial scan from mass-marking devices as disappeared, and it is deliberately
+ * stricter than "the stage reported success".
+ */
+bool app_scan_state_covers_protocol(app_stage_state_t state);
 
 typedef struct {
     app_scan_wifi_t wifi[APP_SCAN_MAX_WIFI];

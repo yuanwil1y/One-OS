@@ -221,6 +221,46 @@ esp_err_t wifi_mgr_clear_credentials(void)
 
 /* ---------------- event handling ---------------- */
 
+/*
+ * Event epoch: which driver generation an event belongs to.
+ *
+ * The Wi-Fi driver is torn down and rebuilt on every scan handover, and both the
+ * teardown and the driver's own dispatch are asynchronous. An event posted by the
+ * old driver can therefore still be queued when the new driver starts, and would
+ * be handled as though it described the new one.
+ *
+ * `driver_up` and `released_for_scan` cannot exclude that on their own, because a
+ * stale event can be delivered while both happen to describe the new, live
+ * driver. The epoch closes the hole by labelling generations:
+ *
+ *   - the worker bumps it immediately BEFORE tearing a driver down and again
+ *     AFTER a new driver is up, so there is no interval in which an old driver's
+ *     event carries the current value;
+ *   - a handler captures the epoch on entry and discards its work if the value
+ *     changed, or if the driver flags do not match.
+ *
+ * It is a second line of defence alongside reading the netif, not a substitute
+ * for it: the netif is what proves an address really exists.
+ */
+static volatile uint32_t s_event_epoch;
+
+static void event_epoch_bump(void)
+{
+    lock();
+    s_event_epoch++;
+    unlock();
+}
+
+static uint32_t event_epoch_read(void)
+{
+    uint32_t value;
+
+    lock();
+    value = s_event_epoch;
+    unlock();
+    return value;
+}
+
 static void clear_ip(void)
 {
     s_ctx.ipv4[0] = '\0';
@@ -235,36 +275,71 @@ static void record_ip(esp_netif_ip_info_t *info)
     (void)snprintf(s_ctx.ipv4, sizeof(s_ctx.ipv4), IPSTR, IP2STR(&info->ip));
 }
 
+/*
+ * Read the address the driver actually holds.
+ *
+ * This, not the event, is the authority: an event records that something happened
+ * at some point, while the netif records what is true now. A stale GOT_IP is
+ * therefore harmless - it cannot fabricate connectivity the netif does not have.
+ */
+static bool netif_has_address(esp_netif_ip_info_t *out)
+{
+    if (s_netif == NULL || out == NULL) {
+        return false;
+    }
+    if (esp_netif_get_ip_info(s_netif, out) != ESP_OK) {
+        return false;
+    }
+    return out->ip.addr != 0u;
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
+    /* Captured before any work: if the driver generation changes while this
+     * handler runs, the change is detected below and the work is discarded. */
+    const uint32_t epoch = event_epoch_read();
     (void)arg;
+    (void)data;
 
     if (base == IP_EVENT) {
+        bool publish = false;
+
         if (id != IP_EVENT_STA_GOT_IP) {
             return;
         }
         lock();
         /*
-         * Only a live, non-released driver may publish an address. A queued
-         * GOT_IP from a previous driver instance must not make the current one
-         * look connected, and must never leave a stale address visible.
+         * Three independent conditions before an address is published:
+         *   - the epoch is unchanged, so this event does not belong to a driver
+         *     generation that has since been torn down or replaced;
+         *   - the driver is up and not deliberately released;
+         *   - the netif really holds an address right now.
+         *
+         * Any one of them alone would be insufficient: the epoch is the
+         * generation check, the flags are the intent check, and the netif read is
+         * the ground truth that no stale event can forge.
          */
-        if (s_ctx.driver_up && !s_ctx.released_for_scan) {
-            record_ip((esp_netif_ip_info_t *)data);
-            s_ctx.state = WIFI_MGR_CONNECTED;
-            s_ctx.last_error = ESP_OK;
-            s_ctx.rssi = 0;
-            {
-                wifi_ap_record_t ap;
-                if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-                    s_ctx.rssi = ap.rssi;
+        if (s_event_epoch == epoch && s_ctx.driver_up && !s_ctx.released_for_scan) {
+            esp_netif_ip_info_t info;
+            if (netif_has_address(&info)) {
+                record_ip(&info);
+                s_ctx.state = WIFI_MGR_CONNECTED;
+                s_ctx.last_error = ESP_OK;
+                s_ctx.rssi = 0;
+                {
+                    wifi_ap_record_t ap;
+                    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                        s_ctx.rssi = ap.rssi;
+                    }
                 }
+                publish = true;
             }
         }
         unlock();
         if (s_events != NULL) {
             (void)xSemaphoreGive(s_events);
         }
+        (void)publish;
         return;
     }
 
@@ -272,29 +347,35 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         return;
     }
 
+    lock();
+    /* Every Wi-Fi event is discarded when the driver generation it belongs to is
+     * no longer the current one. */
+    if (s_event_epoch != epoch) {
+        unlock();
+        if (id == WIFI_EVENT_STA_DISCONNECTED && s_events != NULL) {
+            (void)xSemaphoreGive(s_events);
+        }
+        return;
+    }
+
     switch (id) {
     case WIFI_EVENT_STA_START:
-        lock();
         if (s_ctx.driver_up && !s_ctx.released_for_scan &&
             s_ctx.state != WIFI_MGR_CONNECTED) {
             s_ctx.state = WIFI_MGR_DISCONNECTED;
         }
-        unlock();
         break;
 
     case WIFI_EVENT_STA_CONNECTED:
-        lock();
         /* Associated, but not yet addressed: still not CONNECTED. The address is
          * cleared so a reconnect cannot inherit the previous one. */
         if (s_ctx.driver_up && !s_ctx.released_for_scan) {
             clear_ip();
             s_ctx.state = WIFI_MGR_CONNECTING;
         }
-        unlock();
         break;
 
     case WIFI_EVENT_STA_DISCONNECTED:
-        lock();
         /*
          * Ignore teardown noise: while the driver is deliberately released the
          * disconnect is ours, not a connectivity failure, and it must not
@@ -306,14 +387,15 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             s_ctx.state = s_ctx.credentials_present ? WIFI_MGR_DISCONNECTED
                                                     : WIFI_MGR_UNCONFIGURED;
         }
-        unlock();
-        if (s_events != NULL) {
-            (void)xSemaphoreGive(s_events);
-        }
         break;
 
     default:
         break;
+    }
+    unlock();
+
+    if (id == WIFI_EVENT_STA_DISCONNECTED && s_events != NULL) {
+        (void)xSemaphoreGive(s_events);
     }
 }
 
@@ -382,6 +464,12 @@ static esp_err_t driver_up(void)
     }
 
     s_ctx.driver_up = true;
+    /*
+     * New generation. Bumping here means any event still queued from the previous
+     * driver carries an older epoch and is discarded, and any event this driver
+     * posts from now on carries the current one.
+     */
+    event_epoch_bump();
     return ESP_OK;
 }
 
@@ -390,6 +478,13 @@ static void driver_down(void)
     if (!s_ctx.driver_up) {
         return;
     }
+    /*
+     * Invalidate this generation's events BEFORE teardown. esp_wifi_stop() emits
+     * STA_DISCONNECTED asynchronously, and that event must not be interpreted as
+     * a connectivity failure of whatever comes next; bumping first also closes
+     * the window in which an in-flight GOT_IP could still look current.
+     */
+    event_epoch_bump();
     (void)esp_wifi_disconnect();
     (void)esp_wifi_stop();
     (void)esp_wifi_deinit();
@@ -522,13 +617,33 @@ esp_err_t wifi_mgr_start(void)
         (void)xSemaphoreTake(s_events, pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
     }
 
+    /*
+     * Confirm connectivity from the netif, not from the event.
+     *
+     * The event only says "a GOT_IP was posted". The netif says whether this
+     * driver actually holds an address right now, so a stale or duplicated event
+     * cannot turn this into a reported success. Waiting for the semaphore first
+     * keeps the common case prompt; the netif read is what decides.
+     */
     lock();
+    {
+        esp_netif_ip_info_t info;
+
+        if (netif_has_address(&info) && s_ctx.driver_up && !s_ctx.released_for_scan) {
+            record_ip(&info);
+            s_ctx.state = WIFI_MGR_CONNECTED;
+            s_ctx.last_error = ESP_OK;
+        }
+    }
+
     if (s_ctx.state != WIFI_MGR_CONNECTED) {
-        /* Report the honest outcome instead of assuming success. */
+        /* Report the honest outcome instead of assuming success. CONNECTING at
+         * this point means associated but not addressed, which is not connected. */
         s_ctx.last_error = ESP_ERR_TIMEOUT;
         if (s_ctx.state != WIFI_MGR_ERROR) {
             s_ctx.state = WIFI_MGR_DISCONNECTED;
         }
+        clear_ip();
     }
     err = (s_ctx.state == WIFI_MGR_CONNECTED) ? ESP_OK : ESP_ERR_TIMEOUT;
     unlock();
@@ -671,7 +786,18 @@ bool wifi_mgr_has_ip(void)
 
     lock_init();
     lock();
-    has_ip = s_ctx.state == WIFI_MGR_CONNECTED && s_ctx.ipv4[0] != '\0';
+    /*
+     * The netif is the authority, so this cannot report an address the driver no
+     * longer holds. The state check still matters: it is what distinguishes "we
+     * are a connected station" from "some interface happens to have an address",
+     * and it keeps a released-for-scan driver from looking ready for LAN work.
+     */
+    if (s_ctx.state == WIFI_MGR_CONNECTED && !s_ctx.released_for_scan) {
+        esp_netif_ip_info_t info;
+        has_ip = netif_has_address(&info);
+    } else {
+        has_ip = false;
+    }
     unlock();
     return has_ip;
 }

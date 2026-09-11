@@ -386,6 +386,135 @@ static void test_reset_clears_everything(void)
     CHECK(ev.generation == 2u, "generation advanced");
 }
 
+/* ---------------- RF stage verdict (fault injection) ---------------- */
+
+/*
+ * Fault injection for session teardown.
+ *
+ * A stage that cannot shut its session down must not publish evidence, and a
+ * stage that ended on its own deadline must not be recorded as DONE even though
+ * the call returns a value a caller might read as success.
+ */
+static void test_rf_verdict_clean_run_is_done(void)
+{
+    app_scan_rf_outcome_t outcome;
+    app_scan_rf_verdict_t verdict;
+
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.stop_confirmed = true;
+    outcome.native_error = ESP_OK;
+    outcome.collected = 7u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_DONE, "a clean run is DONE");
+    CHECK(verdict.evidence_usable, "a clean run's evidence is usable");
+}
+
+static void test_rf_verdict_unconfirmed_stop_is_failed_and_unusable(void)
+{
+    app_scan_rf_outcome_t outcome;
+    app_scan_rf_verdict_t verdict;
+
+    /* The session could not be shut down: its task may still be writing. */
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.stop_confirmed = false;
+    outcome.collected = 42u; /* plenty collected, and still unusable */
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_FAILED,
+          "an unconfirmed stop is FAILED, got %s",
+          app_stage_state_name(verdict.terminal_state));
+    CHECK(!verdict.evidence_usable,
+          "evidence from a session we could not stop must NOT be published");
+
+    /* Cancellation does not make a still-running session safe either. */
+    outcome.canceled = true;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(!verdict.evidence_usable, "cancel does not make a live session safe");
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_FAILED,
+          "unconfirmed stop outranks cancel");
+}
+
+static void test_rf_verdict_timeout_is_never_done(void)
+{
+    app_scan_rf_outcome_t outcome;
+    app_scan_rf_verdict_t verdict;
+
+    /* Stopped cleanly but on its own deadline, with results collected. */
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.stop_confirmed = true;
+    outcome.timed_out = true;
+    outcome.collected = 5u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_PARTIAL,
+          "a timed-out stage with results is PARTIAL, got %s",
+          app_stage_state_name(verdict.terminal_state));
+    CHECK(verdict.evidence_usable, "a cleanly stopped session's results are usable");
+
+    /* Timed out with nothing at all: a failure, not a thin success. */
+    outcome.collected = 0u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_FAILED,
+          "a timed-out stage with no results is FAILED");
+}
+
+static void test_rf_verdict_cancel_and_native_error(void)
+{
+    app_scan_rf_outcome_t outcome;
+    app_scan_rf_verdict_t verdict;
+
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.stop_confirmed = true;
+    outcome.canceled = true;
+    outcome.collected = 3u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_CANCELED, "cancel is CANCELED");
+    CHECK(verdict.evidence_usable, "canceled-but-stopped evidence is usable");
+    CHECK(verdict.reason != NULL && strcmp(verdict.reason, "canceled") == 0,
+          "cancel reason recorded");
+
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.stop_confirmed = true;
+    outcome.native_error = ESP_FAIL;
+    outcome.collected = 2u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_PARTIAL,
+          "a native error with results is PARTIAL");
+
+    outcome.collected = 0u;
+    verdict = app_scan_evaluate_rf_stage(&outcome);
+    CHECK(verdict.terminal_state == APP_STAGE_STATE_FAILED,
+          "a native error with no results is FAILED");
+
+    CHECK(app_scan_evaluate_rf_stage(NULL).evidence_usable == false,
+          "a missing outcome is never usable");
+}
+
+/* ---------------- protocol coverage semantics ---------------- */
+
+/*
+ * Coverage is what decides whether a missing device means anything. Only DONE
+ * qualifies: PARTIAL explicitly does not, because a partially covered protocol
+ * may simply have missed the device.
+ */
+static void test_only_done_counts_as_protocol_coverage(void)
+{
+    CHECK(app_scan_state_covers_protocol(APP_STAGE_STATE_DONE),
+          "DONE covers its protocol");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_PARTIAL),
+          "PARTIAL must NOT count as coverage: it may have missed devices");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_SKIPPED),
+          "SKIPPED does not cover");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_FAILED),
+          "FAILED does not cover");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_CANCELED),
+          "CANCELED does not cover");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_PENDING),
+          "PENDING does not cover");
+    CHECK(!app_scan_state_covers_protocol(APP_STAGE_STATE_RUNNING),
+          "RUNNING does not cover");
+}
+
 int main(void)
 {
     test_wifi_stage_requires_driver();
@@ -403,6 +532,11 @@ int main(void)
     test_lan_requires_address();
     test_lan_merges_sources_by_ip();
     test_reset_clears_everything();
+    test_rf_verdict_clean_run_is_done();
+    test_rf_verdict_unconfirmed_stop_is_failed_and_unusable();
+    test_rf_verdict_timeout_is_never_done();
+    test_rf_verdict_cancel_and_native_error();
+    test_only_done_counts_as_protocol_coverage();
 
     printf("app_scan: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
