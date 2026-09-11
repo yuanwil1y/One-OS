@@ -16,5 +16,6 @@ firmware/dependencies.lock
 getjobs.js
 pr-*.md
 msg*.txt
-*-commitmsg.txt
 .git-askpass.cmd
+*-msg*.txt
+*-cleanup-msg.txt

@@ -1,8 +1,0 @@
-chore: keep local scratch files out of the repository
-
-The previous commit accidentally staged CI log dumps and a commit-message
-scratch file. They are removed and .gitignore now covers the local scratch an
-agent may create while working (CI log dumps, helper scripts, PR drafts,
-message files, the askpass helper).
-
-No source or test behaviour changes.
