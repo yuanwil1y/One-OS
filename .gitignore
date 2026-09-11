@@ -19,3 +19,5 @@ msg*.txt
 .git-askpass.cmd
 *-msg*.txt
 *-cleanup-msg.txt
+__pycache__/
+*.pyc

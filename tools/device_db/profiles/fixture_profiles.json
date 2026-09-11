@@ -1,0 +1,249 @@
+{
+  "_comment": [
+    "Canonical Device DB profile input for the B4 fixture corpus.",
+    "",
+    "This is deliberately a SMALL, hand-authored corpus. It is the reference input",
+    "that proves the format, the generator, the validator and the firmware reader",
+    "agree; it is NOT the production recognition database, which lives on SD.",
+    "",
+    "The shape rule for every profile here: only exact protocol facts become",
+    "entities. If a value was never observed or never published by the protocol,",
+    "no entity recipe is written for it. Nothing in this file invents a sensor,",
+    "a capability or a device identity.",
+    "",
+    "Each profile is designed to exercise one behaviour:",
+    "  1001  a recognised BLE broadcast sensor (known device)",
+    "  1002  a recognised Zigbee switch (known device, writable)",
+    "  1003  a second profile sharing 1001's manufacturer id, so a payload with",
+    "        only that id is AMBIGUOUS and must stay non-writable",
+    "  1004  a similar-looking but distinct BLE model that must NOT merge with 1001",
+    "  1005  a LAN service profile matched by mDNS service type",
+    "  none  unknown devices are not represented at all: no profile exists for",
+    "        them, which is exactly how 'unknown' is produced"
+  ],
+  "profiles": [
+    {
+      "profile_id": 1001,
+      "vendor": "Example",
+      "model": "TH-BEACON-1",
+      "display_name": "Example Temp/Humidity Beacon",
+      "icon": "thermometer",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260911",
+        "source_name": "one-os-owned-fixtures",
+        "review": "Authored for One-OS from the published BTHome v2 layout."
+      },
+      "policy": ["passive_only"],
+      "writable": false,
+      "theengs_decoder_id": 1,
+      "fingerprints": [
+        {
+          "protocol": "ble",
+          "key": "181c",
+          "_note": "BTHome v2 service UUID in little-endian wire order."
+        }
+      ],
+      "identity_rules": [
+        {
+          "kind": "vendor_protocol_uuid",
+          "strength": "weak",
+          "key": "181c"
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "sensor",
+          "name": "Temperature",
+          "device_class": "temperature",
+          "unit": "C",
+          "backend": "passive_value",
+          "read_source_id": 1,
+          "min_value": -4000,
+          "max_value": 8500,
+          "scale": 2
+        },
+        {
+          "domain": "sensor",
+          "name": "Humidity",
+          "device_class": "humidity",
+          "unit": "%",
+          "backend": "passive_value",
+          "read_source_id": 2,
+          "min_value": 0,
+          "max_value": 10000,
+          "scale": 2
+        }
+      ]
+    },
+    {
+      "profile_id": 1002,
+      "vendor": "Example",
+      "model": "PLUG-ZB-2",
+      "display_name": "Example Zigbee Plug",
+      "icon": "power-plug",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260911",
+        "source_name": "one-os-owned-fixtures",
+        "review": "Authored for One-OS from the Zigbee Cluster Library OnOff definition."
+      },
+      "policy": ["safe_read", "auth_required", "user_action_required", "write_control"],
+      "writable": true,
+      "zha_quirk_id": 1,
+      "fingerprints": [
+        {
+          "protocol": "zigbee",
+          "key": "example|plug-zb-2",
+          "_note": "Manufacturer|model as reported by Basic cluster 0x0004/0x0005."
+        }
+      ],
+      "identity_rules": [
+        {
+          "kind": "zigbee_ieee",
+          "strength": "strong",
+          "flags": 2,
+          "_flags": "REQUIRES_AUTHORIZATION: only an already-commissioned node."
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "switch",
+          "name": "Outlet",
+          "backend": "zigbee_command",
+          "read_source_id": 0,
+          "write_target_id": 0,
+          "endpoint": 1,
+          "cluster": 6,
+          "command": 1,
+          "_command": "OnOff cluster, On command. Off is command 0."
+        },
+        {
+          "domain": "sensor",
+          "name": "Power",
+          "device_class": "power",
+          "unit": "W",
+          "backend": "zigbee_attribute",
+          "read_source_id": 1291,
+          "subscription_id": 1291,
+          "endpoint": 1,
+          "cluster": 2820,
+          "attribute": 1291,
+          "min_value": 0,
+          "max_value": 36800,
+          "scale": 1
+        }
+      ]
+    },
+    {
+      "profile_id": 1003,
+      "vendor": "Example",
+      "model": "TH-BEACON-2",
+      "display_name": "Example Beacon (variant)",
+      "icon": "thermometer",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260911",
+        "source_name": "one-os-owned-fixtures",
+        "review": "Deliberate variant used to prove AMBIGUOUS behaviour."
+      },
+      "policy": ["passive_only"],
+      "writable": false,
+      "fingerprints": [
+        {
+          "protocol": "ble",
+          "key": "181c",
+          "_note": "Shares 1001's key on purpose: a bare service UUID is ambiguous between the two models."
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "sensor",
+          "name": "Temperature",
+          "device_class": "temperature",
+          "unit": "C",
+          "backend": "passive_value",
+          "read_source_id": 1,
+          "min_value": -4000,
+          "max_value": 8500,
+          "scale": 2
+        }
+      ]
+    },
+    {
+      "profile_id": 1004,
+      "vendor": "Example",
+      "model": "TH-BEACON-1X",
+      "display_name": "Example Temp Beacon (distinct)",
+      "icon": "thermometer",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260911",
+        "source_name": "one-os-owned-fixtures",
+        "review": "Shares the vendor prefix with 1001 but has its own full key, so it must not merge."
+      },
+      "policy": ["passive_only"],
+      "writable": false,
+      "fingerprints": [
+        {
+          "protocol": "ble",
+          "key": "181cff",
+          "_note": "Longer key than 1001: an exact match on 181c must not select this profile."
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "sensor",
+          "name": "Temperature",
+          "device_class": "temperature",
+          "unit": "C",
+          "backend": "passive_value",
+          "read_source_id": 1,
+          "min_value": -4000,
+          "max_value": 8500,
+          "scale": 2
+        }
+      ]
+    },
+    {
+      "profile_id": 1005,
+      "vendor": "Example",
+      "model": "PRINTER-MDNS",
+      "display_name": "Example Network Printer",
+      "icon": "printer",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260911",
+        "source_name": "one-os-owned-fixtures",
+        "review": "mDNS service type that is a published IANA/RFC registration."
+      },
+      "policy": ["safe_read"],
+      "writable": false,
+      "fingerprints": [
+        {
+          "protocol": "mdns",
+          "key": "_ipp._tcp.local",
+          "_note": "Registered service type, so matching it is not a vendor guess."
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "sensor",
+          "name": "Services",
+          "backend": "none",
+          "_note": "Presentation only: no protocol value is decoded, so the recipe carries no capability."
+        }
+      ]
+    }
+  ]
+}

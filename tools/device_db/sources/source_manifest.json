@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "Source manifest for the One-OS Device DB generator.",
+    "",
+    "Every profile must cite one of these source ids, and every profile whose only",
+    "citation is reference-only material is REJECTED by the builder rather than",
+    "shipped. This is the machine-checkable half of the provenance gate in",
+    "docs/application/nearby-devices-browser-controller.md section 5.4.",
+    "",
+    "reuse_class records how material from this source may be used:",
+    "  copy          verbatim data is permitted under the recorded license",
+    "  port          semantics may be re-implemented in our own form",
+    "  clean_room    an independent implementation from published behaviour",
+    "  reference_only usable to understand a protocol, never to emit records",
+    "",
+    "permitted_for_output must be true before any record may be derived. A source",
+    "with permitted_for_output=false is treated as reference-only even if its",
+    "reuse_class says otherwise, so a license review can revoke output without",
+    "editing every profile."
+  ],
+  "sources": [
+    {
+      "source_id": 1,
+      "name": "one-os-owned-fixtures",
+      "revision": "20260911",
+      "license": "public_domain",
+      "reuse_class": "copy",
+      "permitted_for_output": true,
+      "note": "Profiles authored for One-OS from the format specification and public Bluetooth SIG / Connectivity Standards Alliance assignments. No third-party database content."
+    },
+    {
+      "source_id": 2,
+      "name": "home-assistant-zeroconf-ssdp-matchers",
+      "revision": "reference",
+      "license": "apache_2",
+      "reuse_class": "port",
+      "permitted_for_output": false,
+      "note": "Behavioural reference for mDNS/SSDP service naming. Not yet reviewed for output, so any profile citing only this is rejected."
+    },
+    {
+      "source_id": 3,
+      "name": "zha-device-handlers",
+      "revision": "reference",
+      "license": "apache_2",
+      "reuse_class": "port",
+      "permitted_for_output": false,
+      "note": "Declarative quirk reference. Fingerprint data may be portable under Apache-2.0 but has not been reviewed, so it is currently reference-only."
+    },
+    {
+      "source_id": 4,
+      "name": "theengs-decoder",
+      "revision": "reference",
+      "license": "unknown",
+      "reuse_class": "reference_only",
+      "permitted_for_output": false,
+      "note": "GPL-derived material. Usable to understand a BLE payload layout; a clean-room decoder must be written before shipping anything derived from it."
+    },
+    {
+      "source_id": 5,
+      "name": "one-os-owned-captures",
+      "revision": "none-yet",
+      "license": "public_domain",
+      "reuse_class": "clean_room",
+      "permitted_for_output": true,
+      "note": "Reserved for captures taken with our own hardware. Empty until a board is available; listed so provenance can cite it later without a format change."
+    }
+  ]
+}
