@@ -268,7 +268,58 @@ void app_device_generation_begin(uint32_t generation)
     }
 }
 
-void app_device_generation_finish(void)
+bool app_scan_stage_was_observed(const app_scan_status_t *scan,
+                                 app_scan_stage_t stage)
+{
+    if (scan == NULL) {
+        return false;
+    }
+    if ((int)stage < 0 || (int)stage >= (int)APP_STAGE_COUNT) {
+        return false;
+    }
+    /* "Observed" means the stage ran to a state in which it could actually have
+     * seen its protocol. SKIPPED, FAILED and CANCELED all mean it did not look,
+     * so the absence of a device in the results proves nothing. */
+    switch (scan->states[stage]) {
+    case APP_STAGE_STATE_DONE:
+    case APP_STAGE_STATE_PARTIAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Map a binding's source protocols onto the stages that observe them.
+ *
+ * A device is only swept when at least one of its sources actually ran and did
+ * not report it again. If every source was skipped or failed, absence of
+ * evidence says nothing about the device.
+ */
+static bool device_source_was_observed(const device_slot_t *slot,
+                                       const app_scan_status_t *scan)
+{
+    if (scan == NULL) {
+        return false;
+    }
+    if ((slot->value.sources & APP_SOURCE_WIFI) != 0u &&
+        app_scan_stage_was_observed(scan, APP_STAGE_WIFI_RF)) {
+        return true;
+    }
+    if ((slot->value.sources & APP_SOURCE_BLE) != 0u &&
+        app_scan_stage_was_observed(scan, APP_STAGE_BLE_RF)) {
+        return true;
+    }
+    if ((slot->value.sources & APP_SOURCE_LAN) != 0u &&
+        (app_scan_stage_was_observed(scan, APP_STAGE_MDNS) ||
+         app_scan_stage_was_observed(scan, APP_STAGE_SSDP) ||
+         app_scan_stage_was_observed(scan, APP_STAGE_LAN_HOSTS))) {
+        return true;
+    }
+    return false;
+}
+
+void app_device_generation_finish(const app_scan_status_t *scan)
 {
     for (size_t i = 0u; i < APP_DEVICE_MAX; ++i) {
         device_slot_t *slot = &s_devices[i];
@@ -282,20 +333,17 @@ void app_device_generation_finish(void)
             continue;
         }
 
-        /* Not observed in this generation. */
-        if (slot->value.ephemeral) {
-            /* Ephemeral observations belong to the RF environment "now": once a
-             * later generation completes without seeing them, they are gone
-             * rather than accumulating forever. */
-            if (slot->value.last_generation < s_generation) {
-                entity_slot_free_for_device(slot->value.device_id);
-                (void)ha_core_device_remove(slot->value.ha_device_id);
-                memset(slot, 0, sizeof(*slot));
-                s_swept++;
-            }
+        /* Not observed in this generation. Decide whether that means anything. */
+        if (slot->value.ephemeral && device_source_was_observed(slot, scan)) {
+            /* The protocol ran and did not report it: it is really gone. */
+            entity_slot_free_for_device(slot->value.device_id);
+            (void)ha_core_device_remove(slot->value.ha_device_id);
+            memset(slot, 0, sizeof(*slot));
+            s_swept++;
         } else {
-            /* Authorized/persistent identity: keep it, mark it stale so the user
-             * still sees the device instead of losing controller identity. */
+            /* Either a persistent identity, or no protocol that could have seen
+             * it actually ran. Keep it and mark it stale so the user still sees
+             * the device instead of losing it to a partial scan. */
             slot->value.availability = APP_AVAILABILITY_STALE;
         }
     }

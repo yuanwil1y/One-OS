@@ -555,8 +555,9 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
     }
     publish_state();
 
-    /* Sweep ephemeral bindings that this generation did not observe. */
-    app_device_generation_finish();
+    /* Sweep only what a protocol that actually ran failed to re-observe. A
+     * skipped or failed stage must not make its devices look disappeared. */
+    app_device_generation_finish(&report);
 
     response.error = first_error;
     response.stage = last_stage >= 0 ? diag_stage_of((app_scan_stage_t)last_stage)

@@ -228,9 +228,9 @@ static void clear_ip(void)
     s_ctx.rssi = 0;
 }
 
-static void record_ip(esp_netif_ip_info_t *info, esp_netif_t *netif)
+static void record_ip(esp_netif_ip_info_t *info)
 {
-    if (info == NULL || netif == NULL) {
+    if (info == NULL) {
         return;
     }
     (void)snprintf(s_ctx.ipv4, sizeof(s_ctx.ipv4), IPSTR, IP2STR(&info->ip));
@@ -239,32 +239,45 @@ static void record_ip(esp_netif_ip_info_t *info, esp_netif_t *netif)
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    (void)data;
 
-    if (base != WIFI_EVENT) {
-        if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-            lock();
-            record_ip((esp_netif_ip_info_t *)data, s_netif);
+    if (base == IP_EVENT) {
+        if (id != IP_EVENT_STA_GOT_IP) {
+            return;
+        }
+        lock();
+        /*
+         * Only a live, non-released driver may publish an address. A queued
+         * GOT_IP from a previous driver instance must not make the current one
+         * look connected, and must never leave a stale address visible.
+         */
+        if (s_ctx.driver_up && !s_ctx.released_for_scan) {
+            record_ip((esp_netif_ip_info_t *)data);
             s_ctx.state = WIFI_MGR_CONNECTED;
             s_ctx.last_error = ESP_OK;
-            if (s_netif != NULL) {
+            s_ctx.rssi = 0;
+            {
                 wifi_ap_record_t ap;
                 if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
                     s_ctx.rssi = ap.rssi;
                 }
             }
-            unlock();
-            if (s_events != NULL) {
-                (void)xSemaphoreGive(s_events);
-            }
         }
+        unlock();
+        if (s_events != NULL) {
+            (void)xSemaphoreGive(s_events);
+        }
+        return;
+    }
+
+    if (base != WIFI_EVENT) {
         return;
     }
 
     switch (id) {
     case WIFI_EVENT_STA_START:
         lock();
-        if (s_ctx.state != WIFI_MGR_CONNECTED) {
+        if (s_ctx.driver_up && !s_ctx.released_for_scan &&
+            s_ctx.state != WIFI_MGR_CONNECTED) {
             s_ctx.state = WIFI_MGR_DISCONNECTED;
         }
         unlock();
@@ -272,16 +285,28 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
     case WIFI_EVENT_STA_CONNECTED:
         lock();
-        s_ctx.state = WIFI_MGR_CONNECTING;
+        /* Associated, but not yet addressed: still not CONNECTED. The address is
+         * cleared so a reconnect cannot inherit the previous one. */
+        if (s_ctx.driver_up && !s_ctx.released_for_scan) {
+            clear_ip();
+            s_ctx.state = WIFI_MGR_CONNECTING;
+        }
         unlock();
         break;
 
     case WIFI_EVENT_STA_DISCONNECTED:
         lock();
-        clear_ip();
-        /* Without credentials a disconnect is the expected steady state. */
-        s_ctx.state = s_ctx.credentials_present ? WIFI_MGR_DISCONNECTED
-                                                : WIFI_MGR_UNCONFIGURED;
+        /*
+         * Ignore teardown noise: while the driver is deliberately released the
+         * disconnect is ours, not a connectivity failure, and it must not
+         * overwrite the state of the next driver instance.
+         */
+        if (!s_ctx.released_for_scan) {
+            clear_ip();
+            /* Without credentials a disconnect is the expected steady state. */
+            s_ctx.state = s_ctx.credentials_present ? WIFI_MGR_DISCONNECTED
+                                                    : WIFI_MGR_UNCONFIGURED;
+        }
         unlock();
         if (s_events != NULL) {
             (void)xSemaphoreGive(s_events);
@@ -465,15 +490,19 @@ esp_err_t wifi_mgr_start(void)
 
     err = ensure_event_and_netif();
     if (err == ESP_OK) {
-        err = driver_up();
-    }
-    if (err == ESP_OK) {
+        /* Create the event semaphore before any connect attempt. It must exist
+         * even when a scan handover happens on the very first boot, otherwise a
+         * restore after that scan could not observe GOT_IP and would report a
+         * false timeout. */
         if (s_events == NULL) {
             s_events = xSemaphoreCreateBinary();
         }
         if (s_events == NULL) {
             err = ESP_ERR_NO_MEM;
         }
+    }
+    if (err == ESP_OK) {
+        err = driver_up();
     }
     if (err == ESP_OK) {
         err = apply_credentials_and_connect();
@@ -545,17 +574,27 @@ esp_err_t wifi_mgr_release_for_scan(bool *out_was_started, bool *out_was_connect
     was_started = s_ctx.driver_up;
     was_connected = s_ctx.state == WIFI_MGR_CONNECTED;
 
-    if (s_events != NULL) {
-        /* Drain a stale signal so the next wait observes a fresh event. */
-        (void)xSemaphoreTake(s_events, 0);
-    }
-
+    /*
+     * Set the released flag BEFORE tearing the driver down. esp_wifi_stop()
+     * emits STA_DISCONNECTED, and that event must be recognised as our own
+     * teardown rather than as a connectivity failure.
+     */
+    s_ctx.released_for_scan = true;
     driver_down();
     clear_ip();
-    s_ctx.released_for_scan = true;
     s_ctx.state = s_ctx.credentials_present ? WIFI_MGR_DISCONNECTED
                                             : WIFI_MGR_UNCONFIGURED;
     unlock();
+
+    /*
+     * Drain any signal produced by the teardown itself (STA_DISCONNECTED). Doing
+     * this AFTER the teardown - not before - is what makes the next
+     * wifi_mgr_start() wait for a fresh event instead of returning immediately on
+     * a stale one.
+     */
+    if (s_events != NULL) {
+        (void)xSemaphoreTake(s_events, 0);
+    }
 
     if (out_was_started != NULL) {
         *out_was_started = was_started;
