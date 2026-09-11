@@ -345,7 +345,6 @@ static device_slot_t *device_upsert(const char *device_id,
     device_slot_t *slot = device_slot_find(device_id);
     ha_device_t device;
     ha_core_status_t status;
-    bool insert_truncated = false;
 
     if (out_created != NULL) {
         *out_created = false;
