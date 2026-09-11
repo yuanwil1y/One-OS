@@ -69,6 +69,15 @@ static app_scan_evidence_t s_evidence;
 static app_scan_native_stats_t s_scan_stats;
 static app_scan_inputs_t s_scan_inputs;
 
+/*
+ * The recognition source.
+ *
+ * A reference, not an owned object: the SD-backed database lives in its own
+ * translation unit and is installed here at start-up. Passing NULL is valid and
+ * means "no recognition", which must still produce generic read-only Devices.
+ */
+static app_recognizer_ref_t s_recognizer;
+
 /* Set by app_diag_console so the resource report can include its stack. */
 static TaskHandle_t s_console_task;
 
@@ -442,7 +451,7 @@ static app_diag_error_t run_scan_stage(app_scan_stage_t stage,
         return APP_DIAG_ERR_NOT_IMPLEMENTED;
     case APP_STAGE_MATERIALIZE: {
         bool truncated = false;
-        (void)app_device_materialize(ev, &truncated);
+        (void)app_device_materialize(ev, &s_recognizer, &truncated);
         if (truncated) {
             app_ops_scan_mark_truncated(&s_ops);
         }

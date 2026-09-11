@@ -6,6 +6,8 @@ idf_component_register(
         "app_scan.c"
         "app_str.c"
         "device_db_format.c"
+        "app_recognition.c"
+        "app_device_db.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"

@@ -9,6 +9,7 @@
  */
 
 #include "app_device.h"
+#include "app_recognizer.h"
 #include "app_str.h"
 
 #include <stdio.h>
@@ -30,6 +31,18 @@ typedef struct {
     bool seen_wifi;
     bool seen_ble;
     bool seen_lan;
+
+    /*
+     * Recognition bookkeeping.
+     *
+     * `profile_id` is remembered so a later scan can tell whether the matched
+     * profile changed, and `recognition_applied` so the first successful match can
+     * be distinguished from a repeat. Without them a Device would either have its
+     * entities rebuilt on every scan (churning the entity table) or never adopt a
+     * later, better match at all.
+     */
+    uint32_t profile_id;
+    bool recognition_applied;
 } device_slot_t;
 
 typedef struct {
@@ -634,10 +647,223 @@ static void entity_upsert_last_seen(device_slot_t *device, bool *out_truncated)
                   "timestamp", "s", value, out_truncated);
 }
 
+/*
+ * Create one Entity from a recognition recipe.
+ *
+ * `writable` is decided by the caller after checking that the recipe names a
+ * backend this firmware can actually drive, so an entity is only ever writable
+ * when a real control path exists. A read-only recipe still produces the entity:
+ * the device publishes a value we can read.
+ */
+static void entity_upsert_recipe(device_slot_t *device,
+                                 const app_entity_recipe_t *recipe,
+                                 bool writable,
+                                 bool *out_truncated)
+{
+    char entity_id[HA_CORE_ENTITY_ID_LEN];
+    char unique_id[HA_CORE_UNIQUE_ID_LEN];
+    char object_id[HA_CORE_NAME_LEN];
+    entity_slot_t *slot;
+    ha_entity_t entity;
+    ha_core_status_t status;
+
+    /* Stable, slug-safe entity id: the recipe name if usable, else the domain and
+     * read source. Names come from the database, so they may contain anything. */
+    (void)snprintf(object_id, sizeof(object_id), "%s", recipe->name[0] != ' '
+                                                         ? recipe->name
+                                                         : "value");
+    for (size_t i = 0u; object_id[i] != '\0'; ++i) {
+        char c = object_id[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (c >= 'A' && c <= 'Z') {
+            object_id[i] = (char)(c - 'A' + 'a');
+            continue;
+        }
+        if (!ok) {
+            object_id[i] = '_';
+        }
+    }
+    if (object_id[0] == '\0') {
+        (void)app_strlcpy(object_id, "value", sizeof(object_id));
+    }
+
+    (void)snprintf(entity_id, sizeof(entity_id), "%s.%s_%s", recipe->domain,
+                   device->value.device_id, object_id);
+    (void)snprintf(unique_id, sizeof(unique_id), "%s_%s", device->value.device_id,
+                   object_id);
+
+    memset(&entity, 0, sizeof(entity));
+    (void)app_strlcpy(entity.entity_id, entity_id, sizeof(entity.entity_id));
+    (void)app_strlcpy(entity.unique_id, unique_id, sizeof(entity.unique_id));
+    (void)app_strlcpy(entity.platform, "nearby", sizeof(entity.platform));
+    (void)app_strlcpy(entity.domain, recipe->domain, sizeof(entity.domain));
+    (void)app_strlcpy(entity.device_id, device->value.ha_device_id,
+                      sizeof(entity.device_id));
+    (void)app_strlcpy(entity.name, recipe->name, sizeof(entity.name));
+    (void)app_strlcpy(entity.device_class, recipe->device_class,
+                      sizeof(entity.device_class));
+    (void)app_strlcpy(entity.unit_of_measurement, recipe->unit,
+                      sizeof(entity.unit_of_measurement));
+    entity.has_entity_name = true;
+    entity.enabled = true;
+    entity.available = true;
+
+    if (writable) {
+        /* A drivable write path exists. The service mask still has to be one HA
+         * actually defines, so the dispatcher cannot be handed an unknown name. */
+        entity.supported_services = HA_SERVICE_MASK_TURN_ON | HA_SERVICE_MASK_TURN_OFF;
+        entity.service_handler = NULL; /* bound by the control task in B10 */
+        entity.service_context = NULL;
+    } else {
+        entity.supported_services = 0u;
+        entity.service_handler = NULL;
+        entity.service_context = NULL;
+    }
+
+    status = ha_core_entity_upsert(&entity);
+    if (status != HA_CORE_OK) {
+        if (out_truncated != NULL) {
+            *out_truncated = true;
+        }
+        return;
+    }
+
+    slot = entity_slot_find(entity_id);
+    if (slot == NULL) {
+        slot = entity_slot_alloc();
+        if (slot == NULL) {
+            if (out_truncated != NULL) {
+                *out_truncated = true;
+            }
+            return;
+        }
+        (void)app_strlcpy(slot->value.entity_id, entity_id, sizeof(slot->value.entity_id));
+        (void)app_strlcpy(slot->value.device_id, device->value.device_id,
+                          sizeof(slot->value.device_id));
+        (void)app_strlcpy(slot->value.domain, recipe->domain, sizeof(slot->value.domain));
+        (void)app_strlcpy(slot->value.name, recipe->name, sizeof(slot->value.name));
+        (void)app_strlcpy(slot->value.unit, recipe->unit, sizeof(slot->value.unit));
+    }
+    slot->value.writable = writable;
+}
+
+/* ---------------- recognition ---------------- */
+
+/*
+ * Recognise one observation and apply the result to its Device.
+ *
+ * The rules, in one place:
+ *
+ *   - a NULL recognizer, or a database that cannot be used, means recognition is
+ *     UNAVAILABLE: the Device stays generic and says why, rather than vanishing
+ *     or claiming to be unknown;
+ *   - unmatched or ambiguous keeps the Device generic and read-only. Ambiguity is
+ *     never permission to guess;
+ *   - only a deterministic match attaches profile entities, and a writable binding
+ *     is attached only when the recipe names a backend this firmware can drive. A
+ *     database record saying `writable` is a claim about the device, not about our
+ *     capabilities;
+ *   - generic entities (signal, last seen, channel, tx power) are applied either
+ *     way, so a recognised Device does not lose its observed facts.
+ *
+ * Entities are upserted by id, so re-materialising with the same profile refreshes
+ * values instead of churning the entity table.
+ */
+static void apply_recognition(device_slot_t *slot,
+                              const app_recognizer_ref_t *recognizer,
+                              uint32_t sources,
+                              const app_scan_wifi_t *wifi,
+                              const app_scan_ble_t *ble,
+                              const app_scan_lan_t *lan,
+                              bool *out_truncated)
+{
+    app_recognition_result_t result;
+
+    if (recognizer == NULL || recognizer->ops == NULL ||
+        recognizer->ops->recognize == NULL) {
+        slot->value.recognition = APP_RECOGNITION_DB_UNAVAILABLE;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    memset(&result, 0, sizeof(result));
+    if (!recognizer->ops->recognize(recognizer->ctx, sources, wifi, ble, lan,
+                                    &result)) {
+        /* The call could not run at all: no usable database. */
+        slot->value.recognition = APP_RECOGNITION_DB_UNAVAILABLE;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    if (result.ambiguous) {
+        slot->value.recognition = APP_RECOGNITION_AMBIGUOUS;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+    if (!result.matched) {
+        slot->value.recognition = APP_RECOGNITION_UNKNOWN;
+        slot->value.read_only = true;
+        slot->profile_id = 0u;
+        return;
+    }
+
+    slot->value.recognition = APP_RECOGNITION_MATCHED;
+    slot->profile_id = result.profile_id;
+    slot->recognition_applied = true;
+
+    /*
+     * Adopt recognised display metadata only when the Device has no better name of
+     * its own: a name the device itself advertised beats a database label, and a
+     * later stronger match may still replace a generic fallback.
+     */
+    if (result.display_name[0] != '\0') {
+        const ha_device_t *current = ha_core_device_get(slot->value.ha_device_id);
+        const bool generic_name =
+            current == NULL || strcmp(current->name, "Unknown BLE Device") == 0 ||
+            strcmp(current->name, "Unknown Wi-Fi Device") == 0 ||
+            strcmp(current->name, "Hidden Wi-Fi AP") == 0;
+
+        if (generic_name) {
+            ha_device_t device;
+
+            memset(&device, 0, sizeof(device));
+            if (current != NULL) {
+                device = *current;
+            }
+            (void)app_strlcpy(device.id, slot->value.ha_device_id, sizeof(device.id));
+            (void)app_strlcpy(device.name, result.display_name, sizeof(device.name));
+            (void)app_strlcpy(device.manufacturer, result.vendor, sizeof(device.manufacturer));
+            (void)app_strlcpy(device.model, result.model, sizeof(device.model));
+            (void)app_strlcpy(device.model_id, slot->value.protocol_label,
+                              sizeof(device.model_id));
+            if (ha_core_device_upsert(&device) != HA_CORE_OK && out_truncated != NULL) {
+                *out_truncated = true;
+            }
+        }
+    }
+
+    slot->value.read_only = true;
+    for (uint8_t i = 0u; i < result.recipe_count; ++i) {
+        const app_entity_recipe_t *recipe = &result.recipes[i];
+        const bool writable = recipe->write_target_id != DEVICE_DB_NO_INDEX &&
+                              app_backend_is_drivable(recipe->backend);
+
+        entity_upsert_recipe(slot, recipe, writable, out_truncated);
+        if (writable) {
+            slot->value.read_only = false;
+        }
+    }
+}
+
 /* ---------------- materialisation ---------------- */
+
 
 static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
                                        size_t index,
+                                       const app_recognizer_ref_t *recognizer,
                                        bool *out_truncated)
 {
     const app_scan_wifi_t *obs = &ev->wifi[index];
@@ -707,12 +933,15 @@ static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
                       "", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_WIFI, obs, NULL, NULL,
+                      out_truncated);
     return slot;
 }
 
 static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
-                                      size_t index,
-                                      bool *out_truncated)
+                                       size_t index,
+                                       const app_recognizer_ref_t *recognizer,
+                                       bool *out_truncated)
 {
     const app_scan_ble_t *obs = &ev->ble[index];
     char key[16];
@@ -784,12 +1013,15 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
                       "dBm", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_BLE, NULL, obs, NULL,
+                      out_truncated);
     return slot;
 }
 
 static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
-                                      size_t index,
-                                      bool *out_truncated)
+                                       size_t index,
+                                       const app_recognizer_ref_t *recognizer,
+                                       bool *out_truncated)
 {
     const app_scan_lan_t *obs = &ev->lan[index];
     char key[24];
@@ -831,10 +1063,14 @@ static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
                       "", "", value, out_truncated);
     }
 
+    apply_recognition(slot, recognizer, APP_SOURCE_LAN, NULL, NULL, obs,
+                      out_truncated);
     return slot;
 }
 
-size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated)
+size_t app_device_materialize(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              bool *truncated)
 {
     size_t materialized = 0u;
     bool local_truncated = false;
@@ -847,17 +1083,17 @@ size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated)
     }
 
     for (size_t i = 0u; i < ev->wifi_count; ++i) {
-        if (materialize_wifi(ev, i, &local_truncated) != NULL) {
+        if (materialize_wifi(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }
     for (size_t i = 0u; i < ev->ble_count; ++i) {
-        if (materialize_ble(ev, i, &local_truncated) != NULL) {
+        if (materialize_ble(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }
     for (size_t i = 0u; i < ev->lan_count; ++i) {
-        if (materialize_lan(ev, i, &local_truncated) != NULL) {
+        if (materialize_lan(ev, i, recognizer, &local_truncated) != NULL) {
             materialized++;
         }
     }

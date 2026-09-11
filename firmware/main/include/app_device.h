@@ -33,6 +33,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "app_recognizer.h"
 #include "app_scan.h"
 #include "ha_core.h"
 
@@ -132,11 +133,24 @@ bool app_scan_stage_was_observed(const app_scan_status_t *scan,
 
 /* Materialise every observation in `ev` into HA Device/Entity/State.
  *
+ * This is the single production path from evidence to Device/Entity. There is no
+ * separate "without recognition" variant on purpose: one function means a caller
+ * cannot accidentally take the unrecognised path and quietly lose recognition.
+ *
+ * `recognizer` may be NULL, and the database behind it may be unopenable; both
+ * mean "recognition unavailable", which still produces a generic read-only Device.
+ * An unmatched or ambiguous result likewise keeps the Device generic. A matched
+ * result may add profile-defined entities, but a writable binding is attached only
+ * when recognition reports the backend as actually drivable - so a database record
+ * claiming `writable` cannot conjure a control path on its own.
+ *
  * Returns the number of devices created or refreshed. Sets `*truncated` when a
- * bounded table was full, so the caller can report a partial scan instead of
+ * bounded table was full, so the caller reports a partial scan rather than
  * pretending the environment was fully covered.
  */
-size_t app_device_materialize(const app_scan_evidence_t *ev, bool *truncated);
+size_t app_device_materialize(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              bool *truncated);
 
 /* Current generation. */
 uint32_t app_device_generation(void);

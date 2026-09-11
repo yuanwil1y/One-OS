@@ -114,7 +114,7 @@ static void test_unknown_wifi_device_kept_and_read_only(void)
     app_device_generation_begin(1u);
 
     feed_wifi(&ev, bssid, "LivingRoomAP", -55, 6u, 1000u);
-    CHECK(app_device_materialize(&ev, &truncated) == 1u, "one device materialized");
+    CHECK(app_device_materialize(&ev, NULL, &truncated) == 1u, "one device materialized");
     CHECK(!truncated, "nothing truncated");
 
     CHECK(app_device_count() == 1u, "one binding, got %u", (unsigned)app_device_count());
@@ -150,7 +150,7 @@ static void test_entities_are_only_exact_protocol_facts(void)
     app_device_generation_begin(1u);
 
     feed_wifi(&ev, bssid, "AP", -60, 11u, 500u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     binding = app_device_at(0u);
     CHECK(binding != NULL, "binding exists");
 
@@ -200,7 +200,7 @@ static void test_no_entity_when_no_meaningful_value(void)
     /* An advertisement we could not parse gives a device identity but no
      * protocol fact beyond RSSI. TX power must not be fabricated. */
     feed_ble(&ev, addr, 0u, NULL, -70, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_find("sensor.ble_00112233445566_tx_power") == NULL,
           "tx_power must not exist when it was not advertised");
@@ -220,7 +220,7 @@ static void test_tx_power_entity_only_when_advertised(void)
     app_device_generation_begin(1u);
 
     feed_ble(&ev, addr, 0u, "Beacon", -40, true, 4, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_find(id) != NULL, "tx_power entity exists when advertised");
     {
@@ -242,7 +242,7 @@ static void test_same_bytes_different_protocol_are_different_devices(void)
 
     feed_wifi(&ev, mac, "SomeAP", -50, 1u, 100u);
     feed_ble(&ev, mac, 0u, "SomeBLE", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     /* Identical bytes in Wi-Fi and BLE must not be merged into one physical
      * device: there is no safe cross-protocol identity rule for that. */
@@ -268,7 +268,7 @@ static void test_ble_address_type_is_part_of_identity(void)
 
     feed_ble(&ev, addr, 0u, "Type0", -50, false, 0, 100u);
     feed_ble(&ev, addr, 1u, "Type1", -50, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() == 2u,
           "public and random address with same bytes are different devices, got %u",
@@ -290,7 +290,7 @@ static void test_repeat_materialize_does_not_grow(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, bssid, "AP", -50, 1u, 100u);
     for (int i = 0; i < 5; ++i) {
-        (void)app_device_materialize(&ev, &truncated);
+        (void)app_device_materialize(&ev, NULL, &truncated);
         CHECK(app_device_count() == 1u, "repeat %d kept one device, got %u", i,
               (unsigned)app_device_count());
         CHECK(app_entity_count() == 3u, "repeat %d kept three entities, got %u", i,
@@ -366,7 +366,7 @@ static void test_generation_sweeps_unseen_ephemeral(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, a, "AP-A", -50, 1u, 100u);
     feed_wifi(&ev, b, "AP-B", -60, 6u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     CHECK(app_device_count() == 2u, "two devices in generation 1");
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -381,7 +381,7 @@ static void test_generation_sweeps_unseen_ephemeral(void)
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_wifi(&ev, a, "AP-A", -52, 1u, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
 
@@ -416,7 +416,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, wifi_mac, "AP", -50, 1u, 100u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     CHECK(app_device_count() == 2u, "wifi and ble devices materialized");
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 1u;
@@ -428,7 +428,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
@@ -461,7 +461,7 @@ static void test_unrun_protocol_does_not_sweep_its_devices(void)
      * gone and must be swept even though Wi-Fi still has not run. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_BLE_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
@@ -485,7 +485,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -494,7 +494,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     /* Generation 2: the Wi-Fi stage was canceled. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(SCAN_NO_STAGE, SCAN_NO_STAGE);
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_CANCELED;
     scan.generation = 2u;
@@ -504,7 +504,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     /* Generation 3: the Wi-Fi stage failed. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_FAILED;
     scan.generation = 3u;
     app_device_generation_finish(&scan);
@@ -513,7 +513,7 @@ static void test_canceled_and_failed_stages_do_not_sweep(void)
     /* A NULL report is the conservative case: nothing is swept. */
     app_scan_evidence_reset(&ev, 4u);
     app_device_generation_begin(4u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     app_device_generation_finish(NULL);
     CHECK(app_device_count() == 1u, "null report must not sweep");
     CHECK(app_device_find("wifi_710000000001")->availability ==
@@ -538,7 +538,7 @@ static void test_stale_devices_do_not_accumulate_over_many_generations(void)
         app_scan_evidence_reset(&ev, gen);
         app_device_generation_begin(gen);
         feed_wifi(&ev, bssid, "AP", -50, (uint8_t)gen, (uint64_t)gen * 100u);
-        (void)app_device_materialize(&ev, &truncated);
+        (void)app_device_materialize(&ev, NULL, &truncated);
         scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
         scan.generation = gen;
         app_device_generation_finish(&scan);
@@ -558,7 +558,7 @@ static void test_lan_device_uses_hostname_and_ip(void)
     app_device_generation_begin(1u);
 
     feed_lan(&ev, "192.168.1.50", "printer.local", 300u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() == 1u, "one LAN device");
     binding = app_device_find("lan_192_168_1_50");
@@ -586,7 +586,7 @@ static void test_capacity_overflow_is_reported(void)
         uint8_t bssid[6] = {0x30, 0, 0, 0, (uint8_t)(i >> 8), (uint8_t)i};
         feed_wifi(&ev, bssid, "AP", -50, 1u, (uint64_t)(i + 1u) * 10u);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_device_count() <= APP_DEVICE_MAX, "binding table stayed bounded");
     CHECK(truncated, "capacity overflow reported to the caller");
@@ -608,7 +608,7 @@ static void test_entity_capacity_is_bounded(void)
         uint8_t bssid[6] = {0x40, 0, 0, 0, (uint8_t)(i >> 8), (uint8_t)i};
         feed_wifi(&ev, bssid, "AP", -50, 1u, (uint64_t)(i + 1u) * 10u);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     CHECK(app_entity_count() <= APP_ENTITY_MAX, "app entity table stayed bounded");
     CHECK(truncated, "entity/device capacity overflow reported");
@@ -658,7 +658,7 @@ static void test_hostile_ssid_is_not_injected(void)
         obs.ssid[4] = 'J';
         (void)app_scan_ingest_wifi(&ev, &obs);
     }
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     binding = app_device_at(0u);
     CHECK(binding != NULL, "device created");
@@ -686,7 +686,7 @@ static void test_control_is_not_wired(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, bssid, "AP", -50, 1u, 10u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     for (size_t i = 0u; i < app_entity_count(); ++i) {
         const app_entity_binding_t *e = app_entity_at(i);
@@ -722,7 +722,7 @@ static void test_partial_coverage_does_not_sweep(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -732,7 +732,7 @@ static void test_partial_coverage_does_not_sweep(void)
      * did not report the device. A partial scan may simply have missed it. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
     scan.generation = 2u;
@@ -752,7 +752,7 @@ static void test_partial_coverage_does_not_sweep(void)
      * the absence is real evidence. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
@@ -779,7 +779,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -788,7 +788,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     /* A pass where Wi-Fi ran incompletely and missed it: keep it. */
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
     scan.generation = 2u;
@@ -799,7 +799,7 @@ static void test_single_rf_miss_with_full_coverage_sweeps_only_once(void)
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
     feed_wifi(&ev, mac, "AP", -52, 1u, 300u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, SCAN_NO_STAGE);
     scan.generation = 3u;
     app_device_generation_finish(&scan);
@@ -831,7 +831,7 @@ static void test_multi_source_one_missing_one_present(void)
     app_device_generation_begin(1u);
     feed_wifi(&ev, wifi_mac, "AP", -50, 1u, 100u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -60, false, 0, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 1u;
     app_device_generation_finish(&scan);
@@ -843,7 +843,7 @@ static void test_multi_source_one_missing_one_present(void)
     app_scan_evidence_reset(&ev, 2u);
     app_device_generation_begin(2u);
     feed_ble(&ev, ble_addr, 0u, "Sensor", -62, false, 0, 200u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_with(APP_STAGE_WIFI_RF, APP_STAGE_BLE_RF);
     scan.generation = 2u;
     app_device_generation_finish(&scan);
@@ -862,7 +862,7 @@ static void test_multi_source_one_missing_one_present(void)
      * coverage. */
     app_scan_evidence_reset(&ev, 3u);
     app_device_generation_begin(3u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
     scan = scan_report_none();
     scan.states[APP_STAGE_BLE_RF] = APP_STAGE_STATE_DONE;
     scan.states[APP_STAGE_WIFI_RF] = APP_STAGE_STATE_PARTIAL;
@@ -893,7 +893,7 @@ static void test_never_observed_device_is_unavailable_not_stale(void)
     app_scan_evidence_reset(&ev, 1u);
     app_device_generation_begin(1u);
     feed_wifi(&ev, mac, "AP", -50, 1u, 100u);
-    (void)app_device_materialize(&ev, &truncated);
+    (void)app_device_materialize(&ev, NULL, &truncated);
 
     /* Begin a new generation without materialising anything, then finish with
      * every stage skipped. Coverage is incomplete, so nothing is swept. */
