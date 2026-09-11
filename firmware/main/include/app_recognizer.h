@@ -119,6 +119,27 @@ bool app_backend_is_drivable(uint8_t backend);
 const char *app_backend_name(uint8_t backend);
 
 /*
+ * Domain id -> Home Assistant domain string.
+ *
+ * Returns NULL for a domain id this firmware does not know. The reader uses that
+ * to refuse a recipe whose meaning it cannot establish: a database record the
+ * firmware cannot interpret must be reported, not partially applied.
+ */
+const char *app_domain_name(uint8_t domain_id);
+bool app_domain_is_known(uint8_t domain_id);
+
+/*
+ * Does this firmware know which decoder/quirk family a database id refers to?
+ *
+ * The Device DB stores a decoder id and a quirk id per profile. An id this
+ * firmware does not carry means the profile's read recipe cannot be satisfied by
+ * any installed family, so the observation stays generic rather than being
+ * exposed as an Entity whose value nothing can produce.
+ */
+bool app_decoder_is_available(uint32_t decoder_id);
+bool app_quirk_is_available(uint32_t quirk_id);
+
+/*
  * The recognizer vtable is an opaque forward declaration here.
  *
  * Its definition lives with the SD-backed implementation (app_device_db.h), so

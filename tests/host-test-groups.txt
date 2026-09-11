@@ -19,5 +19,6 @@ app_diag_protocol tests/host/run_app_diag_protocol_tests.sh
 app_ops tests/host/run_app_ops_tests.sh
 app_scan tests/host/run_app_scan_tests.sh
 app_device tests/host/run_app_device_tests.sh
+app_device_db tests/host/run_app_device_db_tests.sh
 device_db_python tests/host/run_device_db_python_tests.sh
 device_db_format tests/host/run_device_db_tests.sh

@@ -43,6 +43,15 @@ extern "C" {
  * 32 KiB and covers a corpus far larger than the C6 could otherwise support;
  * anything bigger is reported rather than silently accepted. */
 #define APP_DB_MAX_INDEX_BYTES (1024u * DEVICE_DB_INDEX_BUCKET_SIZE)
+/* Callback budget for a full body-checksum pass: one call per this many bytes.
+ * The pass is read-bound (a 1 MiB corpus is 4096 blocks), so checking every 64
+ * blocks keeps cancellation responsive without turning the hook into the cost. */
+#define APP_DB_PROGRESS_INTERVAL_BYTES (64u * 256u)
+
+/* A recipe's read source is "none" when the format's NO_INDEX sentinel is
+ * stored. Named separately from the raw sentinel so a reader can tell "this
+ * recipe publishes no protocol value" apart from "index 0xFFFFFFFF". */
+#define APP_DB_NO_READ_SOURCE DEVICE_DB_NO_INDEX
 
 /*
  * Storage the database reads through.
@@ -50,6 +59,13 @@ extern "C" {
  * A read that returns fewer bytes than requested must report
  * ESP_ERR_INVALID_SIZE rather than succeeding, so a truncated or shrinking file
  * cannot be mistaken for a valid record.
+ *
+ * FILE IDENTITY IS PART OF THE CONTRACT. `open` must return a handle whose reads
+ * the adapter keeps bound to the same file object for every later `read` - on
+ * FATFS that means a held `FILE *`, not a fresh open per read - so a file
+ * replaced, renamed over or rewritten during a session cannot be observed as a
+ * silent mixture of two corpora. The reader additionally re-checks the header
+ * before each match attempt; see app_device_db.c.
  */
 typedef struct {
     /* Open the database file and report its size. */
@@ -62,10 +78,21 @@ typedef struct {
 } app_db_storage_ops_t;
 
 /*
+ * Optional progress hook, polled during the bounded body-checksum pass.
+ *
+ * Returns true to abandon the pass, which closes the database with IO_ERROR
+ * rather than publishing a partially validated corpus. Platform independent on
+ * purpose: the runtime installs a closure over the operation gate's cancel flag,
+ * and a host test installs one that fires after N calls.
+ */
+typedef bool (*app_db_progress_fn_t)(void *ctx);
+
+/*
  * Recognition database handle.
  *
  * No heap allocation: the header, the record scratch and the index all live in
- * the struct, so this can sit in static storage.
+ * the struct, so this can sit in static storage. The index buffer is supplied by
+ * the caller and is the only variable-size part.
  */
 typedef struct {
     app_db_storage_ops_t storage;
@@ -73,6 +100,13 @@ typedef struct {
 
     app_db_state_t state;
     bool open;
+    /*
+     * True from the moment the storage is bound and a size is known until
+     * close(). Distinct from `open`, which additionally means "fully validated and
+     * safe to match against": the reads that perform validation need the file
+     * before validation has finished.
+     */
+    bool opened;
     uint32_t file_size;
 
     /* Views built over `header` and `index`. */
@@ -85,11 +119,17 @@ typedef struct {
     uint32_t index_capacity;
     uint32_t index_size;
 
+    /* Progress/cancellation hook for the streaming validation pass. */
+    app_db_progress_fn_t progress;
+    void *progress_ctx;
+    uint32_t progress_interval_bytes;
+
     /* Diagnostics. */
     uint32_t content_version;
     uint32_t profile_count;
     uint32_t reads;
     uint32_t read_errors;
+    uint32_t progress_calls;
     bool truncated_result;
     esp_err_t last_error;
 } app_device_db_t;
@@ -123,6 +163,40 @@ void app_device_db_open(app_device_db_t *db,
                         void *storage_ctx,
                         uint8_t *index_buffer,
                         uint32_t index_capacity);
+
+/*
+ * Install a progress/cancellation hook used by the bounded body-checksum pass.
+ *
+ * The hook is polled once per `interval_bytes` (0 selects
+ * APP_DB_PROGRESS_INTERVAL_BYTES). Returning true abandons the pass and leaves
+ * the database closed with IO_ERROR, so a cancelled scan does not spend seconds
+ * hashing a corpus it will not use. Must be called before app_device_db_open();
+ * open() clears it again, because a stale closure would outlive its owner.
+ */
+void app_device_db_set_progress(app_device_db_t *db, app_db_progress_fn_t progress,
+                                void *ctx, uint32_t interval_bytes);
+
+/*
+ * Re-validate the corpus on the medium against what was validated at open.
+ *
+ * Two levels, and the difference matters for cost:
+ *
+ *   matching internally performs the CHEAP check - the header is re-read and
+ *   compared before every match attempt, so a replaced, rewritten or truncated
+ *   file cannot be matched against. Because every `.nbdb` header carries the
+ *   content checksum of its own body, a different corpus cannot present the same
+ *   header, so this catches replacement as well as a same-length rewrite.
+ *
+ *   THIS function additionally streams the whole body checksum, so it also
+ *   catches an in-place edit that leaves the header untouched. That costs a full
+ *   read of the corpus, which is why it is an explicit operation rather than
+ *   something every match pays for on a card shared with the display.
+ *
+ * Returns false and closes the database (state IO_ERROR) when the medium no
+ * longer matches. Not safe to call concurrently with a match: the application
+ * worker owns the database.
+ */
+bool app_device_db_verify_unchanged(app_device_db_t *db);
 
 void app_device_db_close(app_device_db_t *db);
 

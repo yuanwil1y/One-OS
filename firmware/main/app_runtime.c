@@ -21,6 +21,8 @@
 #include <string.h>
 
 #include "app_device.h"
+#include "app_device_db.h"
+#include "app_device_db_sd.h"
 #include "app_scan.h"
 #include "app_scan_native.h"
 #include "app_wifi.h"
@@ -73,10 +75,36 @@ static app_scan_inputs_t s_scan_inputs;
  * The recognition source.
  *
  * A reference, not an owned object: the SD-backed database lives in its own
- * translation unit and is installed here at start-up. Passing NULL is valid and
+ * translation unit and is opened here at start-up. Passing NULL is valid and
  * means "no recognition", which must still produce generic read-only Devices.
  */
 static app_recognizer_ref_t s_recognizer;
+
+/*
+ * The SD corpus and its reader.
+ *
+ * The index is the reader's only variable-size buffer, and it is static so the
+ * budget is fixed and knowable: APP_DB_INDEX_BUDGET bytes, no heap, no growth with
+ * corpus size. The reader itself holds the header plus one record at a time.
+ *
+ * Both live here rather than in a platform-independent file because opening a
+ * database is an I/O operation, and this worker is the single owner of I/O.
+ */
+#define APP_DB_INDEX_BUDGET (256u * DEVICE_DB_INDEX_BUCKET_SIZE)
+
+static app_device_db_t s_db;
+static app_device_db_sd_t s_db_sd;
+static uint8_t s_db_index[APP_DB_INDEX_BUDGET];
+
+/*
+ * Recognition results for the current generation, filled by the enrichment stage
+ * and consumed by materialisation. Static for the same reason as the evidence
+ * store: it is too large for the worker's stack and has exactly one owner.
+ */
+static app_recognition_table_t s_recognition;
+
+/* Whether the corpus was usable when the current scan started, for the report. */
+static app_db_state_t s_db_state_at_scan = APP_DB_STATE_CLOSED;
 
 /* Set by app_diag_console so the resource report can include its stack. */
 static TaskHandle_t s_console_task;
@@ -166,6 +194,9 @@ esp_err_t app_runtime_get_resources(app_runtime_resources_t *out)
     out->op_state = app_ops_state_name(app_ops_state(&s_ops_mirror));
     unlock();
 
+    out->db_state = app_db_state_name(s_db.state);
+    out->db_path = s_db_sd.path;
+
     return ESP_OK;
 }
 
@@ -174,8 +205,138 @@ void app_runtime_set_console_task(TaskHandle_t task)
     s_console_task = task;
 }
 
-/* ---------------- device / entity enumeration ---------------- */
+/* ---------------- recognition database ---------------- */
 
+/*
+ * Progress hook for the streaming body-checksum pass.
+ *
+ * Runs on the worker task, which owns the operation gate, so it reads the cancel
+ * flag directly. This is what keeps a cancel during database validation bounded:
+ * without it a scan could sit hashing a corpus for seconds after the user asked
+ * it to stop.
+ */
+static bool db_progress_cancel_requested(void *ctx)
+{
+    (void)ctx;
+    return app_ops_scan_is_canceled(&s_ops);
+}
+
+/*
+ * Open (or reopen) the corpus.
+ *
+ * Called once at start-up and again before each scan, because a card that was
+ * absent when the device booted must not require a reboot once it is inserted.
+ * Never fatal: every outcome is recorded in `app_db_state_name()` terms and the
+ * application continues with generic Devices.
+ */
+static void open_recognition_database(void)
+{
+    app_db_storage_ops_t ops = app_device_db_sd_ops();
+
+    app_device_db_close(&s_db);
+    app_device_db_set_progress(&s_db, db_progress_cancel_requested, NULL,
+                               APP_DB_PROGRESS_INTERVAL_BYTES);
+    app_device_db_open(&s_db, &ops, &s_db_sd, s_db_index,
+                       (uint32_t)sizeof(s_db_index));
+
+    if (s_db.state == APP_DB_STATE_READY) {
+        /*
+         * A newly opened corpus is validated, so match against it. When it is not
+         * ready the reference is left pointing at the closed handle: the recognizer
+         * then reports "could not run" instead of "nothing matched", which is the
+         * distinction the device table reports to the user.
+         */
+        s_recognizer.ops = app_device_db_recognizer_ops();
+        s_recognizer.ctx = &s_db;
+        ESP_LOGI(TAG, "recognition database ready: %s v%lu profiles=%lu",
+                 s_db_sd.path, (unsigned long)s_db.content_version,
+                 (unsigned long)s_db.profile_count);
+    } else {
+        ESP_LOGW(TAG, "recognition unavailable: %s", app_db_state_name(s_db.state));
+    }
+}
+
+app_db_state_t app_runtime_db_state(void)
+{
+    return s_db.state;
+}
+
+esp_err_t app_runtime_db_describe(char *out, size_t out_size)
+{
+    const app_recognizer_ops_t *ops = app_device_db_recognizer_ops();
+
+    if (out == NULL || out_size == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (ops == NULL || ops->describe == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ops->describe(&s_db, out, out_size);
+    return ESP_OK;
+}
+
+const char *app_runtime_db_path(void)
+{
+    return s_db_sd.path;
+}
+
+/*
+ * The enrichment stage body.
+ *
+ * One recognition pass over all accumulated evidence, before anything is written
+ * to the device tables. The order is the product's: match and refine everything,
+ * then materialise. Doing it the other way would mean matching per protocol while
+ * the device table is being written, which is several passes over the same corpus
+ * and no single place where "what did recognition decide" can be observed.
+ *
+ * The results go into `s_recognition`, and materialisation consumes that table
+ * through a recognizer view - so the database is touched exactly here.
+ */
+static app_diag_error_t run_enrichment_stage(app_scan_evidence_t *ev,
+                                             bool *out_truncated)
+{
+    size_t observations;
+
+    *out_truncated = false;
+
+    /*
+     * Reopen first: the card may have been inserted or replaced since the last
+     * scan, and a scan is the natural point at which to notice.
+     */
+    open_recognition_database();
+    s_db_state_at_scan = s_db.state;
+
+    app_scan_native_request_cancel(app_ops_scan_is_canceled(&s_ops));
+    observations = app_recognition_enrich(ev, &s_recognizer, &s_recognition);
+
+    if (app_recognition_table_truncated(&s_recognition)) {
+        /* Capacity, not a recognition failure: reported so the scan is partial
+         * rather than presented as fully covered. */
+        *out_truncated = true;
+    }
+
+    if (!app_db_state_is_usable(s_db.state)) {
+        /*
+         * Recognition could not run. The stage is SKIPPED with the database's own
+         * reason rather than FAILED: a missing card is a normal deployment state,
+         * not a scan error, and the scan report already carries the distinction
+         * between "no database" and "nothing matched".
+         */
+        ESP_LOGW(TAG, "enrichment skipped: recognition %s",
+                 app_db_state_name(s_db.state));
+        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    }
+
+    if (app_ops_scan_is_canceled(&s_ops)) {
+        return APP_DIAG_ERR_CANCELED;
+    }
+
+    ESP_LOGI(TAG, "enrichment: %lu observations against %s",
+             (unsigned long)observations, s_db_sd.path);
+    return APP_DIAG_OK;
+}
+
+/* ---------------- device / entity enumeration ---------------- */
 /*
  * These helpers read ha_core, which is documented as not thread safe and is
  * owned by one task. They are therefore only called from the worker.
@@ -444,14 +605,31 @@ static app_diag_error_t run_scan_stage(app_scan_stage_t stage,
     case APP_STAGE_LAN_SERVICES:
         err = app_scan_native_lan_services(ev, cfg, stats);
         break;
-    case APP_STAGE_ENRICHMENT:
-        /* No Device DB yet, so no profile-driven enrichment is possible. Safe
-         * read-only enrichment without a profile would be guessing. */
+    case APP_STAGE_ENRICHMENT: {
+        bool trunc4 = false;
+        app_diag_error_t enrich_error = run_enrichment_stage(ev, &trunc4);
+
+        if (trunc4) {
+            app_ops_scan_mark_truncated(&s_ops);
+        }
+        if (enrich_error == APP_DIAG_OK) {
+            (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_DONE);
+            return APP_DIAG_OK;
+        }
         (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
-        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+        return enrich_error;
+    }
     case APP_STAGE_MATERIALIZE: {
         bool truncated = false;
-        (void)app_device_materialize(ev, &s_recognizer, &truncated);
+        /*
+         * Materialisation consumes the recognition table, not the database. A
+         * device with no entry there is reported as "recognition unavailable",
+         * which is exactly what happens when the enrichment stage was skipped, so
+         * a missing database can never turn into a silent "unknown".
+         */
+        app_recognizer_ref_t ref = app_recognition_table_recognizer(&s_recognition);
+
+        (void)app_device_materialize(ev, &ref, &truncated);
         if (truncated) {
             app_ops_scan_mark_truncated(&s_ops);
         }
@@ -723,7 +901,26 @@ esp_err_t app_runtime_start(void)
     app_ops_init(&s_ops);
     app_ops_init(&s_ops_mirror);
     app_scan_evidence_reset(&s_evidence, 0u);
+    app_recognition_table_reset(&s_recognition);
     app_device_table_reset();
+
+    /*
+     * Bind the SD adapter and take a first look at the corpus.
+     *
+     * "At boot: attempt device_db_open(); continue application startup regardless
+     * of recognition result." A missing card, a missing file, a corrupt corpus and
+     * an unsupported version are all recorded states, not start-up failures, and a
+     * card inserted later is picked up by the reopen before the next scan.
+     */
+    {
+        app_device_db_sd_config_t sd_config;
+
+        memset(&sd_config, 0, sizeof(sd_config));
+        sd_config.auto_mount = true;
+        sd_config.format_if_mount_failed = false;
+        app_device_db_sd_init(&s_db_sd, &sd_config);
+        open_recognition_database();
+    }
 
     /* Prepare STA ownership and load stored credentials. An unprovisioned
      * device is a normal state; it must not stop the runtime from starting. */

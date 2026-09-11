@@ -16,6 +16,16 @@
 
 #include <string.h>
 
+/*
+ * The decoder/quirk availability question is answered by the family that owns
+ * the id space, so it is asked directly instead of being duplicated as a list
+ * here. Two stub headers of the same name let the host test build compile this
+ * file without the ESP-IDF-only family sources; see tests/host/stubs/README.md.
+ * The stub is a test double and is never part of the firmware build.
+ */
+#include "theengs_l2.h"
+#include "zha_l2.h"
+
 const char *app_db_state_name(app_db_state_t state)
 {
     switch (state) {
@@ -76,6 +86,73 @@ const char *app_backend_name(uint8_t backend)
     case DEVICE_DB_BACKEND_MATTER_COMMAND:   return "matter_command";
     default:                                 return "unknown";
     }
+}
+
+/*
+ * Domain ids.
+ *
+ * The database stores a numeric domain id per recipe. Mapping it here - rather
+ * than reading the domain string out of the file as the entity id - is what puts
+ * the entity namespace under this firmware's control. A recipe naming a domain
+ * this table does not contain is refused by the reader instead of producing an
+ * entity id built from an unknown string.
+ *
+ * The names are the Home Assistant domain strings, so a later GUI and the
+ * service dispatcher see the same vocabulary the HA model uses.
+ */
+const char *app_domain_name(uint8_t domain_id)
+{
+    switch (domain_id) {
+    case DEVICE_DB_DOMAIN_SENSOR:        return "sensor";
+    case DEVICE_DB_DOMAIN_BINARY_SENSOR: return "binary_sensor";
+    case DEVICE_DB_DOMAIN_SWITCH:        return "switch";
+    case DEVICE_DB_DOMAIN_LIGHT:         return "light";
+    case DEVICE_DB_DOMAIN_BUTTON:        return "button";
+    case DEVICE_DB_DOMAIN_NUMBER:        return "number";
+    case DEVICE_DB_DOMAIN_SELECT:        return "select";
+    case DEVICE_DB_DOMAIN_CLIMATE:       return "climate";
+    default:                             return NULL;
+    }
+}
+
+bool app_domain_is_known(uint8_t domain_id)
+{
+    return app_domain_name(domain_id) != NULL;
+}
+
+/*
+ * Decoder/quirk availability.
+ *
+ * A profile may select a Theengs decoder, a ZHA quirk, both or neither, and the
+ * two id spaces are independent. The question this answers is narrow and
+ * deliberate: can this firmware decode the payload of the family named here at
+ * all? It is not a statement that a particular profile's recipe is complete -
+ * that is the reader's job, per record.
+ *
+ * The lookup is a real call into the family, not a compiled-in list, so it
+ * cannot drift out of sync with the family's own supported set.
+ */
+bool app_decoder_is_available(uint32_t decoder_id)
+{
+    theengs_model_info_t info;
+
+    if (decoder_id == DEVICE_DB_NO_INDEX || decoder_id > UINT16_MAX) {
+        return false;
+    }
+    memset(&info, 0, sizeof(info));
+    return theengs_model_info((theengs_decoder_id_t)decoder_id, &info) ==
+           THEENGS_STATUS_OK;
+}
+
+bool app_quirk_is_available(uint32_t quirk_id)
+{
+    zha_quirk_info_t info;
+
+    if (quirk_id == DEVICE_DB_NO_INDEX) {
+        return false;
+    }
+    memset(&info, 0, sizeof(info));
+    return zha_quirk_get_info(quirk_id, &info) == ZHA_STATUS_OK;
 }
 
 void app_recognition_copy_string(char *dst, size_t dst_size,

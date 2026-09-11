@@ -8,6 +8,7 @@ idf_component_register(
         "device_db_format.c"
         "app_recognition.c"
         "app_device_db.c"
+        "app_device_db_sd.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"
@@ -27,6 +28,8 @@ idf_component_register(
         esp_netif
         nvs_flash
         lwip
+        fatfs
+        sdmmc
         ha_core
         ha_discovery_l2
         esphome_l2

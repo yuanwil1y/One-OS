@@ -86,14 +86,20 @@ static const char *build_payload(const app_diag_response_t *response,
 
     case APP_DIAG_CMD_RESOURCES: {
         app_runtime_resources_t res;
+        char db_description[96];
+
         if (app_runtime_get_resources(&res) != ESP_OK) {
             return NULL;
+        }
+        if (app_runtime_db_describe(db_description, sizeof(db_description)) != ESP_OK) {
+            (void)snprintf(db_description, sizeof(db_description), "unavailable");
         }
         (void)snprintf(s_payload, sizeof(s_payload),
                        "op=%s generation=%lu stage_completed=%lu stage_total=%lu\n"
                        "free_heap=%lu min_free_heap=%lu largest_block=%lu\n"
                        "worker_stack_high_water=%lu console_stack_high_water=%lu\n"
-                       "queue_drops=%lu",
+                       "queue_drops=%lu\n"
+                       "db_state=%s db=%s db_path=%s",
                        res.op_state,
                        (unsigned long)res.generation,
                        (unsigned long)res.stage_completed,
@@ -103,7 +109,10 @@ static const char *build_payload(const app_diag_response_t *response,
                        (unsigned long)res.largest_free_block_bytes,
                        (unsigned long)res.worker_stack_high_water_bytes,
                        (unsigned long)res.console_stack_high_water_bytes,
-                       (unsigned long)res.queue_drops);
+                       (unsigned long)res.queue_drops,
+                       res.db_state != NULL ? res.db_state : "invalid",
+                       db_description,
+                       res.db_path != NULL ? res.db_path : "");
         return s_payload;
     }
 

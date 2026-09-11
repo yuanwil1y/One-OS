@@ -58,7 +58,6 @@ static uint32_t s_swept;
 
 /* Defined below; needed by the eviction path to avoid orphaned Entities. */
 static void entity_slot_free_for_device(const char *device_id);
-
 const char *app_recognition_name(app_recognition_state_t state)
 {
     switch (state) {
@@ -280,6 +279,11 @@ uint32_t app_device_generation(void)
     return s_generation;
 }
 
+uint32_t app_device_swept_count(void)
+{
+    return s_swept;
+}
+
 /* ---------------- generation lifecycle ---------------- */
 
 void app_device_generation_begin(uint32_t generation)
@@ -428,6 +432,390 @@ static void format_ip_key(char *out, size_t out_size, const char *ipv4)
         out[j++] = (c == '.') ? '_' : c;
     }
     out[j] = '\0';
+}
+
+/*
+ * Identity keys, exposed so enrichment and materialisation agree by construction.
+ *
+ * The key is namespaced per protocol and includes everything that makes two
+ * observations different devices: a BLE address type is part of the identity, and
+ * the same bytes seen in Wi-Fi, BLE and LAN are three keys, never one. Both the
+ * device table and the recognition table are keyed by exactly these functions, so
+ * a recognition result can only ever be applied to the observation it came from.
+ */
+size_t app_device_identity_of_wifi(const app_scan_wifi_t *obs, char *out,
+                                   size_t out_size)
+{
+    char mac[16];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_mac(mac, sizeof(mac), obs->bssid);
+    format_device_id(out, out_size, "wifi_", mac);
+    return strlen(out);
+}
+
+size_t app_device_identity_of_ble(const app_scan_ble_t *obs, char *out,
+                                  size_t out_size)
+{
+    char mac[16];
+    char type_key[24];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_mac(mac, sizeof(mac), obs->address);
+    (void)snprintf(type_key, sizeof(type_key), "%02x%s", obs->address_type, mac);
+    format_device_id(out, out_size, "ble_", type_key);
+    return strlen(out);
+}
+
+size_t app_device_identity_of_lan(const app_scan_lan_t *obs, char *out,
+                                  size_t out_size)
+{
+    char key[24];
+
+    if (obs == NULL || out == NULL || out_size == 0u) {
+        return 0u;
+    }
+    format_ip_key(key, sizeof(key), obs->ipv4);
+    format_device_id(out, out_size, "lan_", key);
+    return strlen(out);
+}
+
+/* ---------------- recognition table ---------------- */
+
+/* Identity of whichever observation `sources` names. Exactly one source bit is
+ * expected; a multi-source observation takes the first present source, matching
+ * the recognizer's own precedence. Returns false when nothing identifies it. */
+static bool identity_of_observation(uint32_t sources,
+                                    const app_scan_wifi_t *wifi,
+                                    const app_scan_ble_t *ble,
+                                    const app_scan_lan_t *lan,
+                                    char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0u) {
+        return false;
+    }
+    out[0] = '\0';
+
+    if ((sources & APP_SOURCE_BLE) != 0u && ble != NULL) {
+        return app_device_identity_of_ble(ble, out, out_size) > 0u;
+    }
+    if ((sources & APP_SOURCE_WIFI) != 0u && wifi != NULL) {
+        return app_device_identity_of_wifi(wifi, out, out_size) > 0u;
+    }
+    if ((sources & APP_SOURCE_LAN) != 0u && lan != NULL) {
+        return app_device_identity_of_lan(lan, out, out_size) > 0u;
+    }
+    if (ble != NULL) {
+        return app_device_identity_of_ble(ble, out, out_size) > 0u;
+    }
+    if (wifi != NULL) {
+        return app_device_identity_of_wifi(wifi, out, out_size) > 0u;
+    }
+    if (lan != NULL) {
+        return app_device_identity_of_lan(lan, out, out_size) > 0u;
+    }
+    return false;
+}
+
+void app_recognition_table_reset(app_recognition_table_t *table)
+{
+    if (table == NULL) {
+        return;
+    }
+    memset(table, 0, sizeof(*table));
+}
+
+size_t app_recognition_table_count(const app_recognition_table_t *table)
+{
+    return table == NULL ? 0u : table->count;
+}
+
+bool app_recognition_table_truncated(const app_recognition_table_t *table)
+{
+    return table != NULL && table->truncated;
+}
+
+const app_recognition_entry_t *app_recognition_table_find(
+    const app_recognition_table_t *table, const char *identity)
+{
+    if (table == NULL || identity == NULL || identity[0] == '\0') {
+        return NULL;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT &&
+            strcmp(table->entries[i].identity, identity) == 0) {
+            return &table->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static app_recognition_entry_t *recognition_entry_get(
+    app_recognition_table_t *table, const char *identity, uint32_t sources)
+{
+    app_recognition_entry_t *entry;
+
+    if (table == NULL || identity == NULL || identity[0] == '\0') {
+        return NULL;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT &&
+            strcmp(table->entries[i].identity, identity) == 0) {
+            return &table->entries[i];
+        }
+    }
+    if (table->count >= APP_RECOGNITION_TABLE_MAX) {
+        /*
+         * The table is full, so this observation gets no entry at all - and the
+         * caller must report a partial scan, because a device with no entry stays
+         * generic even when the corpus would have recognised it.
+         *
+         * The existing entries are deliberately NOT blanked. Blanking them would
+         * turn a capacity problem into "recognition unavailable" for devices that
+         * were in fact recognised, which is a false statement about the database;
+         * leaving them is a false statement about coverage, which the truncation
+         * flag discloses. Understating requires no correction, misreporting does.
+         */
+        table->truncated = true;
+        return NULL;
+    }
+    entry = &table->entries[table->count++];
+    memset(entry, 0, sizeof(*entry));
+    entry->state = APP_RECOGNITION_ENTRY_PRESENT;
+    entry->sources = sources;
+    (void)app_strlcpy(entry->identity, identity, sizeof(entry->identity));
+    return entry;
+}
+
+/*
+ * True when an entry was just refused for capacity.
+ *
+ * Tracked as a public flag on the table plus this helper so the enrich loop can
+ * stop asking, while the flag itself stays the single statement of "the result is
+ * incomplete" that the caller reports.
+ */
+static bool recognition_table_saturated(const app_recognition_table_t *table)
+{
+    return table != NULL && table->truncated;
+}
+
+/*
+ * Record one observation's recognition outcome.
+ *
+ * The result is normalised here into the three states the device layer acts on,
+ * so the device layer never has to re-derive them:
+ *
+ *   - the recognizer could not run (no recognizer, no usable database) ->
+ *     `attempted == false`. The device is reported as "recognition unavailable",
+ *     which is a different statement from "nothing matched";
+ *   - ambiguous -> recorded as ambiguous and left without recipes, so nothing
+ *     writable can be built from it;
+ *   - matched -> the recipes the reader accepted, already filtered for backend
+ *     drivability at the database boundary.
+ */
+static bool recognition_record(app_recognition_table_t *table,
+                               const app_recognizer_ref_t *recognizer,
+                               uint32_t sources, const char *identity,
+                               const app_scan_wifi_t *wifi,
+                               const app_scan_ble_t *ble,
+                               const app_scan_lan_t *lan)
+{
+    app_recognition_entry_t *entry = recognition_entry_get(table, identity, sources);
+    app_recognition_result_t result;
+
+    if (entry == NULL) {
+        return false;
+    }
+    if (recognizer == NULL || recognizer->ops == NULL ||
+        recognizer->ops->recognize == NULL) {
+        entry->attempted = false;
+        return true;
+    }
+
+    memset(&result, 0, sizeof(result));
+    if (!recognizer->ops->recognize(recognizer->ctx, sources, wifi, ble, lan,
+                                    &result)) {
+        entry->attempted = false;
+        return true;
+    }
+
+    entry->attempted = true;
+    if (result.ambiguous) {
+        /* Ambiguity is carried through but never as a match: no recipe, no
+         * display metadata, nothing writable. */
+        memset(&entry->result, 0, sizeof(entry->result));
+        entry->result.ambiguous = true;
+        entry->result.theengs_decoder_id = DEVICE_DB_NO_INDEX;
+        entry->result.zha_quirk_id = DEVICE_DB_NO_INDEX;
+        entry->result.backend_name = "none";
+        return true;
+    }
+    entry->result = result;
+    return true;
+}
+
+size_t app_recognition_enrich(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              app_recognition_table_t *table)
+{
+    size_t recorded = 0u;
+
+    if (table == NULL) {
+        return 0u;
+    }
+    app_recognition_table_reset(table);
+    if (ev == NULL) {
+        return 0u;
+    }
+
+    /*
+     * Every observation is attempted, and `recorded` counts attempts rather than
+     * stored entries: an observation past the table's capacity was still tried,
+     * and the difference between "we tried and could not store it" and "we never
+     * looked" is what app_recognition_table_truncated() reports. A caller that
+     * conflated the two would either hide a capacity problem or claim recognition
+     * failed when the database was never consulted.
+     *
+     * The loops stop early once the table is saturated, because nothing further
+     * can be stored and continuing would only burn read I/O on the card.
+     */
+    for (size_t i = 0u; i < ev->wifi_count; ++i) {
+        char identity[HA_CORE_ID_LEN];
+
+        if (app_device_identity_of_wifi(&ev->wifi[i], identity,
+                                        sizeof(identity)) == 0u) {
+            continue;
+        }
+        recorded++;
+        if (!recognition_record(table, recognizer, APP_SOURCE_WIFI, identity,
+                                &ev->wifi[i], NULL, NULL)) {
+            break;
+        }
+    }
+    if (!recognition_table_saturated(table)) {
+        for (size_t i = 0u; i < ev->ble_count; ++i) {
+            char identity[HA_CORE_ID_LEN];
+
+            if (app_device_identity_of_ble(&ev->ble[i], identity,
+                                           sizeof(identity)) == 0u) {
+                continue;
+            }
+            recorded++;
+            if (!recognition_record(table, recognizer, APP_SOURCE_BLE, identity,
+                                    NULL, &ev->ble[i], NULL)) {
+                break;
+            }
+        }
+    }
+    if (!recognition_table_saturated(table)) {
+        for (size_t i = 0u; i < ev->lan_count; ++i) {
+            char identity[HA_CORE_ID_LEN];
+
+            if (app_device_identity_of_lan(&ev->lan[i], identity,
+                                           sizeof(identity)) == 0u) {
+                continue;
+            }
+            recorded++;
+            if (!recognition_record(table, recognizer, APP_SOURCE_LAN, identity,
+                                    NULL, NULL, &ev->lan[i])) {
+                break;
+            }
+        }
+    }
+    return recorded;
+}
+
+/*
+ * Recognizer view over an enriched table.
+ *
+ * The kernel the device table talks to. It never touches the database: it copies
+ * the stored result for the identity it is asked about, which is what makes
+ * "recognition happened in the enrichment stage" true by construction rather than
+ * by convention, and keeps the device table independent of SD.
+ */
+static bool table_recognizer_recognize(void *ctx, uint32_t sources,
+                                       const app_scan_wifi_t *wifi,
+                                       const app_scan_ble_t *ble,
+                                       const app_scan_lan_t *lan,
+                                       app_recognition_result_t *out)
+{
+    app_recognition_table_t *table = (app_recognition_table_t *)ctx;
+    const app_recognition_entry_t *entry = NULL;
+    char identity[HA_CORE_ID_LEN];
+
+    if (out == NULL) {
+        return false;
+    }
+
+    if (identity_of_observation(sources, wifi, ble, lan, identity,
+                                sizeof(identity))) {
+        entry = app_recognition_table_find(table, identity);
+    }
+
+    if (entry == NULL || !entry->attempted) {
+        /* No outcome was recorded for this observation, so recognition could not
+         * run. Reported as such rather than as "not matched". */
+        memset(out, 0, sizeof(*out));
+        out->theengs_decoder_id = DEVICE_DB_NO_INDEX;
+        out->zha_quirk_id = DEVICE_DB_NO_INDEX;
+        out->backend_name = "none";
+        return false;
+    }
+
+    *out = entry->result;
+    (void)sources;
+    return true;
+}
+
+static app_db_state_t table_recognizer_state(void *ctx)
+{
+    const app_recognition_table_t *table = (const app_recognition_table_t *)ctx;
+
+    if (table == NULL) {
+        return APP_DB_STATE_CLOSED;
+    }
+    for (size_t i = 0u; i < table->count && i < APP_RECOGNITION_TABLE_MAX; ++i) {
+        if (table->entries[i].state == APP_RECOGNITION_ENTRY_PRESENT) {
+            return table->entries[i].attempted ? APP_DB_STATE_READY
+                                               : APP_DB_STATE_CLOSED;
+        }
+    }
+    return APP_DB_STATE_CLOSED;
+}
+
+static void table_recognizer_describe(void *ctx, char *out, size_t out_size)
+{
+    const app_recognition_table_t *table = (const app_recognition_table_t *)ctx;
+
+    if (out == NULL || out_size == 0u) {
+        return;
+    }
+    if (table == NULL) {
+        (void)snprintf(out, out_size, "closed");
+        return;
+    }
+    (void)snprintf(out, out_size, "enriched entries=%lu%s",
+                   (unsigned long)app_recognition_table_count(table),
+                   table->truncated ? " truncated" : "");
+}
+
+static const app_recognizer_ops_t s_table_ops = {
+    .recognize = table_recognizer_recognize,
+    .state = table_recognizer_state,
+    .describe = table_recognizer_describe,
+};
+
+app_recognizer_ref_t app_recognition_table_recognizer(app_recognition_table_t *table)
+{
+    app_recognizer_ref_t ref;
+
+    ref.ops = &s_table_ops;
+    ref.ctx = table;
+    return ref;
 }
 
 /* ---------------- device upsert ---------------- */
@@ -916,9 +1304,11 @@ static device_slot_t *materialize_wifi(const app_scan_evidence_t *ev,
     device_slot_t *slot;
     bool created = false;
 
+    /* The identity is built by the shared helper, so the device table and the
+     * recognition table cannot disagree about which observation this is. */
+    (void)app_device_identity_of_wifi(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
     format_mac(key, sizeof(key), obs->bssid);
-    format_device_id(device_id, sizeof(device_id), "wifi_", key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "wifi_", key);
 
     if (obs->has_ssid && obs->ssid_len > 0u) {
         /* The SSID is untrusted bytes from the air. Copy it as a bounded C
@@ -996,10 +1386,11 @@ static device_slot_t *materialize_ble(const app_scan_evidence_t *ev,
 
     format_mac(key, sizeof(key), obs->address);
     /* Address type is part of the identity: the same bytes with a different
-     * type are a different peer, so it is encoded into the key. */
+     * type are a different peer. The shared helper encodes that rule, so the
+     * recognition table keys BLE observations identically. */
+    (void)app_device_identity_of_ble(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
     (void)snprintf(type_key, sizeof(type_key), "%02x%s", obs->address_type, key);
-    format_device_id(device_id, sizeof(device_id), "ble_", type_key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "ble_", type_key);
 
     if (obs->has_parsed_adv && obs->adv.name_present && obs->adv.name[0] != '\0') {
         size_t len = strlen(obs->adv.name);
@@ -1074,8 +1465,8 @@ static device_slot_t *materialize_lan(const app_scan_evidence_t *ev,
     const char *name;
 
     format_ip_key(key, sizeof(key), obs->ipv4);
-    format_device_id(device_id, sizeof(device_id), "lan_", key);
-    format_device_id(ha_device_id, sizeof(ha_device_id), "lan_", key);
+    (void)app_device_identity_of_lan(obs, device_id, sizeof(device_id));
+    (void)app_strlcpy(ha_device_id, device_id, sizeof(ha_device_id));
 
     name = obs->hostname[0] != '\0' ? obs->hostname : obs->ipv4;
 

@@ -155,6 +155,103 @@ size_t app_device_materialize(const app_scan_evidence_t *ev,
 /* Current generation. */
 uint32_t app_device_generation(void);
 
+/*
+ * Number of application bindings removed so far - swept as no longer observed,
+ * or evicted to make room. Reported by diagnostics: a device that disappears
+ * from the list must be accounted for, not silently dropped.
+ */
+uint32_t app_device_swept_count(void);
+
+/*
+ * Per-observation recognition results, filled by the enrichment stage.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The product workflow recognises the whole accumulated evidence set in one
+ * place and only then materialises Devices. Keeping that order matters:
+ *
+ *   - "one App Device DB is responsible for all fingerprint matching", so
+ *     matching happens once per observation per generation, in one stage that
+ *     the scan report accounts for, instead of being re-derived per protocol
+ *     while the device table is being written;
+ *   - the device table still receives recognition only through
+ *     app_recognizer_ref_t, so it cannot reach the SD database itself;
+ *   - the result is inspectable, so a test can assert what recognition decided
+ *     without going through materialisation.
+ *
+ * Entries are keyed by the same identity the device table uses (protocol +
+ * observation bytes), so a lookup cannot cross protocols: the same bytes in
+ * Wi-Fi and BLE stay two devices with two independent results.
+ */
+#define APP_RECOGNITION_TABLE_MAX APP_DEVICE_MAX
+
+typedef enum {
+    APP_RECOGNITION_ENTRY_EMPTY = 0,
+    APP_RECOGNITION_ENTRY_PRESENT,
+} app_recognition_entry_state_t;
+
+typedef struct {
+    app_recognition_entry_state_t state;
+    uint32_t sources;
+    char identity[HA_CORE_ID_LEN];   /* the same key the device table builds */
+    bool attempted;                  /* false: recognition could not run at all */
+    app_recognition_result_t result;
+} app_recognition_entry_t;
+
+typedef struct {
+    app_recognition_entry_t entries[APP_RECOGNITION_TABLE_MAX];
+    size_t count;
+    /*
+     * True when an observation could not be stored because the table was full.
+     * The caller reports a partial scan; it never means "nothing matched".
+     */
+    bool truncated;
+} app_recognition_table_t;
+
+void app_recognition_table_reset(app_recognition_table_t *table);
+
+/* Number of recorded outcomes. */
+size_t app_recognition_table_count(const app_recognition_table_t *table);
+
+/* True when an observation could not be recorded because the table was full. The
+ * caller reports a partial scan; it never means "nothing matched". */
+bool app_recognition_table_truncated(const app_recognition_table_t *table);
+
+/* Identity key for one observation, exactly as the device table builds it.
+ * `out` receives a NUL-terminated key and the return value is the key length,
+ * or 0 when the observation has no usable identity. */
+size_t app_device_identity_of_wifi(const app_scan_wifi_t *obs, char *out, size_t out_size);
+size_t app_device_identity_of_ble(const app_scan_ble_t *obs, char *out, size_t out_size);
+size_t app_device_identity_of_lan(const app_scan_lan_t *obs, char *out, size_t out_size);
+
+const app_recognition_entry_t *app_recognition_table_find(
+    const app_recognition_table_t *table, const char *identity);
+
+/*
+ * Recognise every observation in `ev` and record the outcome.
+ *
+ * This is the enrichment stage body. It performs the matching, resolves the
+ * decoder/quirk selection and prepares the entity recipes, but it writes no
+ * Device or Entity: materialisation applies them, so a failure here leaves the
+ * previous generation's Devices intact rather than half-updated.
+ *
+ * Returns the number of observations recorded. `recognizer` may be NULL or point
+ * at a closed database; every entry is then recorded as "not attempted" and the
+ * caller keeps generic Devices.
+ */
+size_t app_recognition_enrich(const app_scan_evidence_t *ev,
+                              const app_recognizer_ref_t *recognizer,
+                              app_recognition_table_t *table);
+
+/*
+ * A recognizer view over an already-enriched table.
+ *
+ * Materialisation receives this instead of the database, so each Device adopts
+ * the result enrichment decided for its own observation. A device with no entry
+ * is reported as not attemptable, which keeps it generic.
+ */
+app_recognizer_ref_t app_recognition_table_recognizer(app_recognition_table_t *table);
+
 #ifdef __cplusplus
 }
 #endif

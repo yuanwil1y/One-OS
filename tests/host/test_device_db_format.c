@@ -36,10 +36,6 @@ static int checks = 0;
         }                                                                     \
     } while (0)
 
-#ifndef DEVICE_DB_FIXTURE_DIR
-#error "DEVICE_DB_FIXTURE_DIR must be defined by the runner"
-#endif
-
 /* Read a whole file. Returns NULL on failure. */
 static uint8_t *read_file(const char *path, uint32_t *out_size)
 {
@@ -100,11 +96,88 @@ static char *join(const char *dir, const char *name)
     return path;
 }
 
+/*
+ * Where the corpus lives.
+ *
+ * The runner passes -DDEVICE_DB_FIXTURE_DIR. It is optional here so the group can
+ * also run on a host whose shell cannot quote a Windows path through a -D flag:
+ * without it, the directory is derived from this file's own __FILE__, which is
+ * correct both in-tree and out-of-tree. A directory that cannot be found fails the
+ * run rather than skipping, so the reader is never silently untested.
+ */
+#ifdef DEVICE_DB_FIXTURE_DIR
+#define FIXTURE_DIR_CANDIDATE DEVICE_DB_FIXTURE_DIR
+#else
+#define FIXTURE_DIR_CANDIDATE ""
+#endif
+
+static char g_fixture_dir[1024];
+
+static bool fixture_dir_usable(const char *dir)
+{
+    char *path;
+    FILE *f;
+
+    if (dir == NULL || dir[0] == '\0') {
+        return false;
+    }
+    path = join(dir, "devices_fixture.nbdb");
+    if (path == NULL) {
+        return false;
+    }
+    f = fopen(path, "rb");
+    free(path);
+    if (f == NULL) {
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+static void resolve_fixture_dir(void)
+{
+    static const char *const suffixes[] = {
+        "/../fixtures/device_db",
+        "/tests/fixtures/device_db",
+        "/../../tests/fixtures/device_db",
+    };
+    static const char separators[] = { '/', '\\' };
+
+    if (fixture_dir_usable(FIXTURE_DIR_CANDIDATE)) {
+        snprintf(g_fixture_dir, sizeof(g_fixture_dir), "%s", FIXTURE_DIR_CANDIDATE);
+        return;
+    }
+
+    for (size_t s = 0u; s < sizeof(suffixes) / sizeof(suffixes[0]); ++s) {
+        for (size_t k = 0u; k < sizeof(separators); ++k) {
+            const char *slash = strrchr(__FILE__, separators[k]);
+            size_t dir_len;
+            size_t total;
+
+            if (slash == NULL) {
+                continue;
+            }
+            dir_len = (size_t)(slash - __FILE__);
+            total = dir_len + strlen(suffixes[s]) + 1u;
+            if (total >= sizeof(g_fixture_dir)) {
+                continue;
+            }
+            memcpy(g_fixture_dir, __FILE__, dir_len);
+            snprintf(g_fixture_dir + dir_len, sizeof(g_fixture_dir) - dir_len, "%s",
+                     suffixes[s]);
+            if (fixture_dir_usable(g_fixture_dir)) {
+                return;
+            }
+        }
+    }
+    g_fixture_dir[0] = '\0';
+}
+
 /* ---------------- the valid fixture ---------------- */
 
 static void test_valid_fixture(void)
 {
-    char *path = join(DEVICE_DB_FIXTURE_DIR, "devices_fixture.nbdb");
+    char *path = join(g_fixture_dir, "devices_fixture.nbdb");
     uint32_t size = 0u;
     uint8_t *bytes;
     device_db_t db;
@@ -320,7 +393,7 @@ static void test_valid_fixture(void)
 
 static void test_accessor_bounds(void)
 {
-    char *path = join(DEVICE_DB_FIXTURE_DIR, "devices_fixture.nbdb");
+    char *path = join(g_fixture_dir, "devices_fixture.nbdb");
     uint32_t size = 0u;
     uint8_t *bytes;
     device_db_t db;
@@ -387,13 +460,12 @@ static void test_open_rejects_degenerate_inputs(void)
 
 static void test_invalid_variants_rejected(void)
 {
-    char *manifest_path = join(DEVICE_DB_FIXTURE_DIR, "invalid/manifest.txt");
+    char *manifest_path = join(g_fixture_dir, "invalid/manifest.txt");
     FILE *manifest;
     char line[256];
     unsigned count = 0u;
 
-    CHECK(manifest_path != NULL, "manifest path");
-    if (manifest_path == NULL) {
+    CHECK(manifest_path != NULL, "manifest path");    if (manifest_path == NULL) {
         return;
     }
     manifest = fopen(manifest_path, "r");
@@ -421,7 +493,12 @@ static void test_invalid_variants_rejected(void)
         }
         ++count;
 
-        path = join(DEVICE_DB_FIXTURE_DIR "/invalid", line);
+        {
+            char *invalid_dir = join(g_fixture_dir, "invalid");
+
+            path = invalid_dir == NULL ? NULL : join(invalid_dir, line);
+            free(invalid_dir);
+        }
         CHECK(path != NULL, "variant path");
         if (path == NULL) {
             continue;
@@ -511,6 +588,15 @@ static void test_format_constants(void)
 
 int main(void)
 {
+    resolve_fixture_dir();
+    if (g_fixture_dir[0] == '\0') {
+        printf("FATAL: cannot locate the device_db fixture corpus.\n");
+        printf("       looked for -DDEVICE_DB_FIXTURE_DIR and a path relative to %s\n",
+               __FILE__);
+        return 2;
+    }
+    printf("--- fixture corpus: %s ---\n", g_fixture_dir);
+
     test_format_constants();
     test_valid_fixture();
     test_accessor_bounds();
