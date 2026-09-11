@@ -14,11 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: List host test groups
+        # tests/host-test-groups.txt is the single source of truth for which
+        # runners exist; tests/run_all_host_tests.sh is the single entry point.
+        run: tests/run_all_host_tests.sh --list
+
       - name: Run all host test groups
-        # tests/run_all_host_tests.sh is the single entry point. It invokes the
-        # original per-group runners, so this job and a developer shell run the
-        # identical commands. LEAK_SANITIZER=0 only disables the LeakSanitizer
-        # leak check; ASan/UBSan stay active.
+        # LEAK_SANITIZER=0 disables only the LeakSanitizer leak check for
+        # containers that cannot read /proc/<pid>/task. ASan/UBSan stay active.
+        # No repository test is modified, weakened or disabled.
         run: LEAK_SANITIZER=0 tests/run_all_host_tests.sh
 
   build:
