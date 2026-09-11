@@ -23,12 +23,15 @@
 #include "app_device.h"
 #include "app_device_db.h"
 #include "app_device_db_sd.h"
+#include "app_http_portal.h"
+#include "app_provision.h"
 #include "app_scan.h"
 #include "app_scan_native.h"
 #include "app_wifi.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -303,6 +306,294 @@ bool app_runtime_db_info(uint32_t *out_content_version, uint32_t *out_profile_co
         *out_profile_count = s_db.profile_count;
     }
     return true;
+}
+
+/* ---------------- provisioning portal ---------------- */
+
+/*
+ * The portal session and its two transports.
+ *
+ * The session is owned by the worker, because only the worker handles a `portal` request
+ * - and the worker is also the only thing that runs a scan, which is what makes the
+ * operation gate meaningful. The HTTP server runs its own task, but its handlers read the
+ * same session object and go through the wire layer, so there is still one business path.
+ */
+static app_provision_t s_portal;
+static app_http_portal_t s_http_portal;
+static app_db_import_t s_portal_import;
+
+/*
+ * The password and the token are shown once, to the local console, and never again.
+ *
+ * This flag is what makes "once" true: the operator reads them off the screen and types
+ * them, and a second `portal status` afterwards prints where to find them instead of
+ * repeating them into a scrollback buffer that may be captured. It is exactly the
+ * discipline the product rules ask for - the secret is presented locally, once, and does
+ * not become a value that lives in logs.
+ */
+static bool s_portal_credentials_shown;
+
+static void portal_db_close(void *ctx)
+{
+    (void)ctx;
+    /*
+     * Closing the reader is what makes the replace window harmless. Between the two
+     * renames the corpus path holds nothing, so a reader mid-seek would be reading a file
+     * that no longer has a name - and could answer a match out of a corpus being retired.
+     */
+    app_device_db_close(&s_db);
+}
+
+static esp_err_t portal_db_reopen(void *ctx)
+{
+    (void)ctx;
+    open_recognition_database();
+    /*
+     * A reopen that finds no usable corpus is a normal state, not an error: the reader is
+     * back either way and the reported database state says why recognition is off. Failing
+     * here would turn "the card is empty" into "the portal broke".
+     */
+    return ESP_OK;
+}
+
+static uint32_t portal_now_ms(void *ctx)
+{
+    (void)ctx;
+    return now_ms();
+}
+
+static void portal_sta_release(void *ctx)
+{
+    bool was_started = false;
+    bool was_connected = false;
+
+    (void)ctx;
+    (void)wifi_mgr_release_for_scan(&was_started, &was_connected);
+}
+
+static esp_err_t portal_sta_restore(void *ctx)
+{
+    (void)ctx;
+    return wifi_mgr_restore_after_scan();
+}
+
+static esp_err_t portal_ap_start(void *ctx, const char *ssid, const char *password)
+{
+    (void)ctx;
+    return wifi_mgr_ap_start(ssid, password);
+}
+
+static esp_err_t portal_ap_stop(void *ctx)
+{
+    (void)ctx;
+    return wifi_mgr_ap_stop();
+}
+
+static esp_err_t portal_server_start(void *ctx, uint16_t port)
+{
+    (void)ctx;
+    s_http_portal.port = port;
+    return app_http_portal_start(&s_http_portal, NULL);
+}
+
+static esp_err_t portal_server_stop(void *ctx)
+{
+    (void)ctx;
+    return app_http_portal_stop(&s_http_portal);
+}
+
+static void portal_status_fill(void *ctx, app_portal_status_t *out);
+static size_t portal_device_count(void *ctx);
+static size_t portal_entity_count(void *ctx);
+
+static void portal_status_fill(void *ctx, app_portal_status_t *out)
+{
+    (void)ctx;
+    app_portal_native_status_fill(NULL, out);
+}
+
+static size_t portal_device_count(void *ctx)
+{
+    (void)ctx;
+    return app_device_count();
+}
+
+static size_t portal_entity_count(void *ctx)
+{
+    (void)ctx;
+    return app_entity_count();
+}
+
+static const app_http_portal_hooks_t s_portal_hooks = {
+    .status_fill = portal_status_fill,
+    .device_count = portal_device_count,
+    .entity_count = portal_entity_count,
+};
+
+/* Every one of these is required: a partially wired session would silently skip a
+ * rollback step, which is exactly the failure the session exists to prevent. */
+static app_provision_ops_t portal_ops(void)
+{
+    app_provision_ops_t ops;
+
+    memset(&ops, 0, sizeof(ops));
+    ops.ap_start = portal_ap_start;
+    ops.ap_stop = portal_ap_stop;
+    ops.sta_restore = portal_sta_restore;
+    ops.sta_release = portal_sta_release;
+    ops.server_start = portal_server_start;
+    ops.server_stop = portal_server_stop;
+    ops.db_close = portal_db_close;
+    ops.db_reopen = portal_db_reopen;
+    ops.now_ms = portal_now_ms;
+    ops.random_u32 = esp_random;
+    return ops;
+}
+
+/*
+ * Prepare the portal session.
+ *
+ * Called once at start-up. Building the session does NOT start it: the portal is an
+ * operator action, never a boot action, because an access point that came up on its own
+ * would take the station down at every reboot.
+ */
+static void portal_setup(void)
+{
+    app_provision_ops_t ops = portal_ops();
+    app_db_import_io_t io = app_device_db_sd_ops();
+    app_provision_config_t config;
+    char path[APP_DB_IMPORT_PATH_MAX];
+
+    app_provision_config_default(&config);
+
+    if (app_device_db_sd_path(&s_db_sd, path, sizeof(path))) {
+        (void)app_db_import_init(&s_portal_import, &io, &s_db_sd, path, 0u);
+    }
+
+    memset(&s_http_portal, 0, sizeof(s_http_portal));
+    s_http_portal.session = &s_portal;
+    s_http_portal.import = &s_portal_import;
+    s_http_portal.hooks = &s_portal_hooks;
+    s_http_portal.hooks_ctx = NULL;
+
+    if (app_provision_init(&s_portal, &ops, NULL, &s_ops, &config) != ESP_OK) {
+        ESP_LOGE(TAG, "portal session could not be initialised");
+    }
+}
+
+/*
+ * `request <id> portal <start|stop|status>`
+ *
+ * Runs on the worker, like every other request, so the operation gate it takes is the
+ * same one a scan takes and the two cannot overlap.
+ */
+static app_diag_error_t execute_portal(const app_diag_request_t *request,
+                                       app_diag_response_t *response,
+                                       char *payload, size_t payload_size)
+{
+    const char *verb = request->action;
+
+    if (strcmp(verb, "start") == 0) {
+        app_provision_status_t status = app_provision_start(&s_portal);
+
+        if (status != APP_PROVISION_OK) {
+            response->detail = app_provision_status_name(status);
+            return (status == APP_PROVISION_ERR_BUSY) ? APP_DIAG_ERR_BUSY
+                                                      : APP_DIAG_ERR_INTERNAL;
+        }
+        /*
+         * The credentials are NOT assembled here. Starting the session is this worker's
+         * job; presenting the password is the local console's, through
+         * app_runtime_portal_present(). Keeping them apart is what stops the secret from
+         * travelling through a response structure that other transports also use.
+         */
+        s_portal_credentials_shown = false;
+        return APP_DIAG_OK;
+    }
+
+    if (strcmp(verb, "stop") == 0) {
+        app_provision_status_t status = app_provision_stop(&s_portal);
+
+        s_portal_credentials_shown = false;
+        return (status == APP_PROVISION_OK) ? APP_DIAG_OK : APP_DIAG_ERR_INTERNAL;
+    }
+
+    if (strcmp(verb, "status") == 0) {
+        /*
+         * Status never contains the password or the token, whether or not they have been
+         * shown. It reports that the session is up and whether the credentials were
+         * presented - the same discipline /api/status follows, applied to the console as
+         * well so nobody is tempted to treat the serial port as an exception.
+         */
+        (void)payload;
+        (void)payload_size;
+        return APP_DIAG_OK;
+    }
+
+    response->detail = "portal_verb_unknown";
+    return APP_DIAG_ERR_INVALID_ARGUMENT;
+}
+
+/*
+ * Present the session credentials, once, to the caller - which must be the local console.
+ *
+ * The name says "present" rather than "get" because that is the contract: these values are
+ * shown to the operator and are not readable again afterwards. A second call reports
+ * where they went rather than repeating them, so a terminal scrollback captured later does
+ * not contain the password.
+ *
+ * Returns false when no session is active.
+ */
+bool app_runtime_portal_present(char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0u) {
+        return false;
+    }
+    out[0] = '\0';
+
+    if (!app_provision_is_active(&s_portal)) {
+        return false;
+    }
+    if (s_portal_credentials_shown) {
+        (void)snprintf(out, out_size,
+                       "portal=active credentials=shown_once already");
+        return true;
+    }
+
+    {
+        char ap_ipv4[WIFI_MGR_IPV4_MAX];
+
+        if (wifi_mgr_ap_ipv4(ap_ipv4, sizeof(ap_ipv4)) != ESP_OK) {
+            (void)app_strlcpy(ap_ipv4, "-", sizeof(ap_ipv4));
+        }
+        (void)snprintf(out, out_size,
+                       "portal=active\n"
+                       "ssid=%s\n"
+                       "password=%s\n"
+                       "token=%s\n"
+                       "ap_ipv4=%s\n"
+                       "note: shown once on this console; never repeated in a status "
+                       "response or a log",
+                       s_portal.ap_ssid, s_portal.ap_password, s_portal.token, ap_ipv4);
+    }
+    s_portal_credentials_shown = true;
+    return true;
+}
+
+/* One-line portal report for `portal status`: phase, whether the AP is really up, and
+ * whether the credentials were presented. Never the credentials themselves. */
+esp_err_t app_runtime_portal_status(char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    (void)snprintf(out, out_size,
+                   "portal=%s ap_active=%u credentials=%s upload=%s",
+                   app_provision_phase_name(s_portal.phase),
+                   (unsigned)(wifi_mgr_ap_is_up() ? 1u : 0u),
+                   s_portal_credentials_shown ? "presented" : "not_presented",
+                   app_db_import_phase_name(s_portal_import.phase));
+    return ESP_OK;
 }
 
 /*
@@ -891,6 +1182,13 @@ static app_diag_response_t execute_request(const app_diag_request_t *request)
          * NOT_IMPLEMENTED so no caller can mistake it for a state change. */
         return make_response(request, APP_DIAG_ERR_NOT_IMPLEMENTED);
 
+    case APP_DIAG_CMD_PORTAL: {
+        app_diag_error_t err = execute_portal(request, &response, NULL, 0u);
+
+        return (err == APP_DIAG_OK) ? make_response(request, APP_DIAG_OK)
+                                    : make_response(request, err);
+    }
+
     default:
         return make_response(request, APP_DIAG_ERR_UNKNOWN_COMMAND);
     }
@@ -963,6 +1261,14 @@ esp_err_t app_runtime_start(void)
     /* Prepare STA ownership and load stored credentials. An unprovisioned
      * device is a normal state; it must not stop the runtime from starting. */
     (void)wifi_mgr_init();
+
+    /*
+     * Build the portal session.
+     *
+     * Built, not started: an access point that came up on its own would take the station
+     * down at every reboot. Starting one is an operator action, through the local console.
+     */
+    portal_setup();
 
     if (xTaskCreate(app_worker_task, "app_worker", APP_RUNTIME_WORKER_STACK, NULL,
                     APP_RUNTIME_WORKER_PRIO, &s_worker) != pdPASS) {

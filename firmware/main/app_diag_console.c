@@ -135,6 +135,28 @@ static const char *build_payload(const app_diag_response_t *response,
         *out_truncated = truncated;
         return s_payload;
 
+    case APP_DIAG_CMD_PORTAL:
+        /*
+         * The portal's answer is produced here rather than by the runtime, because
+         * presenting a one-time password is a property of THIS transport: it is the local
+         * console, and that is the only place the product rules allow the credentials to
+         * appear. The runtime owns the session and shares it; it does not print it.
+         *
+         * `start` is the only verb that reveals anything, and only once. `status` reports
+         * that they were presented, never what they are.
+         */
+        if (strcmp(request->action, "start") == 0) {
+            if (!app_runtime_portal_present(s_payload, sizeof(s_payload))) {
+                (void)snprintf(s_payload, sizeof(s_payload),
+                               "portal=not_active");
+            }
+            return s_payload;
+        }
+        if (app_runtime_portal_status(s_payload, sizeof(s_payload)) != ESP_OK) {
+            return NULL;
+        }
+        return s_payload;
+
     default:
         return NULL;
     }
