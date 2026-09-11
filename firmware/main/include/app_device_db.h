@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "app_recognizer.h"
+#include "app_scan.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus

@@ -318,7 +318,7 @@ void app_device_db_open(app_device_db_t *db,
 /* ---------------- string and record loading ---------------- */
 
 /* Resolve a StringRef into a bounded, NUL-terminated buffer. */
-static bool load_string(app_device_db_t *db, uint8_t *dst, size_t dst_size,
+static bool load_string(app_device_db_t *db, char *dst, size_t dst_size,
                         uint32_t ref)
 {
     uint8_t length = (uint8_t)(ref & 0xFFu);

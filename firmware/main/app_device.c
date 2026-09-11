@@ -9,6 +9,7 @@
  */
 
 #include "app_device.h"
+#include "app_device_db.h"
 #include "app_recognizer.h"
 #include "app_str.h"
 
@@ -669,7 +670,7 @@ static void entity_upsert_recipe(device_slot_t *device,
 
     /* Stable, slug-safe entity id: the recipe name if usable, else the domain and
      * read source. Names come from the database, so they may contain anything. */
-    (void)snprintf(object_id, sizeof(object_id), "%s", recipe->name[0] != ' '
+    (void)snprintf(object_id, sizeof(object_id), "%s", recipe->name[0] != '\0'
                                                          ? recipe->name
                                                          : "value");
     for (size_t i = 0u; object_id[i] != '\0'; ++i) {
