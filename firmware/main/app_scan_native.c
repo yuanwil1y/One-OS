@@ -15,11 +15,11 @@
 
 #include "app_wifi.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_timer.h"
 #include "ha_discovery.h"
 #include "kismet_ble.h"
 #include "kismet_wifi.h"
-#include "lwip/def.h"
 #include "nmap_l2.h"
 #include "wireshark_l2.h"
 
@@ -885,24 +885,23 @@ esp_err_t app_scan_native_lan_services(app_scan_evidence_t *ev,
                   : SCAN_NMAP_DEFAULT_TIMEOUT_MS;
     deadline = now_ms() + timeout;
 
-    /* Collect bounded targets from the evidence already gathered. Parsing the
-     * addresses back from text keeps this independent of how they arrived
-     * (mDNS, SSDP or Nmap) rather than trusting one source. */
+    /* Collect bounded targets from the evidence already gathered.
+     *
+     * The address is parsed with esp_netif_str_to_ip4() rather than sscanf: it
+     * accepts exactly dotted-quad IPv4 and rejects anything else, reports its own
+     * error instead of relying on a count, and avoids the uint32_t vs unsigned int
+     * mismatch that a "%u" scanf has. */
     for (size_t i = 0u; i < ev->lan_count && target_count < SCAN_NMAP_MAX_HOSTS; ++i) {
-        uint32_t a = 0u;
-        uint32_t b = 0u;
-        uint32_t c = 0u;
-        uint32_t d = 0u;
-        char tail = '\0';
-        const char *ip = ev->lan[i].ipv4;
+        esp_ip4_addr_t parsed;
 
-        if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) {
+        if (esp_netif_str_to_ip4(ev->lan[i].ipv4, &parsed) != ESP_OK) {
             continue;
         }
-        if (a > 255u || b > 255u || c > 255u || d > 255u) {
+        if (parsed.addr == 0u) {
+            /* 0.0.0.0 is not a probe target. */
             continue;
         }
-        targets[target_count].addr_be = htonl((a << 24) | (b << 16) | (c << 8) | d);
+        targets[target_count].addr_be = parsed.addr;
         ++target_count;
     }
     if (target_count == 0u) {
