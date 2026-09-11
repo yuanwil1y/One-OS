@@ -140,6 +140,39 @@ GUI 开始前，至少完成目标版本所需后端的 B10/B11；未支持协�
 
 ## 清理交接
 
-已修正 README，关闭已被 PR #12 整合的 PR #5。20 个旧分支仍在远端，完整名称/SHA 在 tools/branch-cleanup-candidates.tsv。
-有权限的 Agent 可执行 python3 tools/cleanup_remote_branches.py 预览，再加 --apply 备份并删除。若 main 的代码已变化，脚本停止并要求重新审计；不得移除保护强行运行。
+已修正 README，关闭已被 PR #12 整合的 PR #5。
+
+**已执行（2026-09-11 续作）**：20 个旧分支在重新审计确认 SHA 未变、无新增独有成果后，
+经全量镜像备份，用逐分支 lease 加 atomic push 全部删除。当前远端仅剩 `main` 与
+`research/matter-chip-tool-l2-api`，beta 标签与 Releases 完好。执行细节见
+[development-status.md](development-status.md) 的「分支处置」。
+
+`tools/cleanup_remote_branches.py` 保留用于复核，重复执行只会报告候选已不存在。
+若 main 的代码已变化，脚本仍会停止并要求重新审计；不得移除保护强行运行。
+
 保留 main、Matter 研究分支、beta 标签/Releases、现用测试、来源记录。docs/research 是历史调研，不等于当前任务授权或实现状态，按当前代码及本任务书判断。
+
+## 执行记录：B0（2026-09-11）
+
+分支 `feat/b0-diag-entry`。CI run `34606978491` 全绿：ESP-IDF v6.1 / esp32c6 构建成功，
+10 组 host tests 全通过（`failed groups: 0`）。
+
+已交付：
+
+- `tests/run_all_host_tests.sh` 唯一 host 测试入口，读取 `tests/host-test-groups.txt`
+  清单调用各组原有 runner，不复制测试。`LEAK_SANITIZER=0` 只关 LeakSanitizer 的 leak 检查，
+  ASan/UBSan 仍生效，未改动任何仓库测试。
+- `firmware/main/app_diag_protocol.{c,h}`：无平台依赖的请求/响应层，含 request id、阶段、
+  阶段状态、错误与**相互独立**的 partial/truncated 标志。
+- `firmware/main/include/app_ops.h` + `app_ops.c`：应用级操作门与扫描代次/阶段生命周期，
+  同样无平台依赖，固件与 host 测试编译同一份源码。
+- `firmware/main/app_runtime.c`：单 worker 任务拥有全部状态变更；调用者提交请求并阻塞到
+  自己的响应写回，响应缓冲区不经队列复制，协议回调不得触碰 HA/LVGL。
+- `firmware/main/app_diag_console.c`：仅传输层，把请求交给 runtime 并打印返回报告。
+- Zigbee 边界修复（`549562e`）：interview 无回调时的超时收尾、`retries=255` 计数回绕、
+  失败 re-interview 保留 last-known-good。
+
+**未完成**：每个扫描阶段体仍是空实现，记为 `skipped` 并返回 `not_implemented`；
+`control` 同样返回 `not_implemented`。因此 B0 只完成了“构建与诊断入口”，
+B1—B3 的“真实扫描→设备状态→串口输出”尚未跑通，不得宣称已完成。
+本轮无实板，所有实板验收仍待办。

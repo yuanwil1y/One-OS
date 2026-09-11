@@ -15,6 +15,35 @@ extern "C" {
 #define ZIGPY_MAX_VALUE_SIZE 64u
 #define ZIGPY_MAX_IDENTITY_LEN 32u
 
+/*
+ * Largest retry count this implementation will honour.
+ *
+ * zigpy_transaction_result_t::attempts is uint8_t and starts at 1, so a retry
+ * limit of 255 could never be exceeded by a counter of that width: the counter
+ * would wrap to 0 and polling would retry forever. Callers asking for more than
+ * this value are clamped down instead of silently generating an unbounded retry
+ * loop.
+ */
+#define ZIGPY_MAX_RETRIES 254u
+
+/*
+ * Interview deadlines.
+ *
+ * An interview only advances when the backend invokes the matching
+ * zigpy_interview_*_complete callback. If the backend never calls back (silent
+ * device, dropped frame, backend fault) the interview would otherwise stay
+ * active forever and block every later interview with ZIGPY_STATUS_BUSY.
+ * `phase_timeout_ms` bounds each individual step; `overall_timeout_ms` bounds
+ * the whole interview. A zero field selects the corresponding default.
+ */
+#define ZIGPY_INTERVIEW_DEFAULT_PHASE_TIMEOUT_MS 5000u
+#define ZIGPY_INTERVIEW_DEFAULT_OVERALL_TIMEOUT_MS 30000u
+
+typedef struct {
+    uint32_t phase_timeout_ms;
+    uint32_t overall_timeout_ms;
+} zigpy_interview_config_t;
+
 #define ZIGPY_INTERVIEW_COMPLETE_NODE_DESC (1u << 0)
 #define ZIGPY_INTERVIEW_COMPLETE_ACTIVE_EP (1u << 1)
 #define ZIGPY_INTERVIEW_COMPLETE_SIMPLE_DESC (1u << 2)
@@ -90,6 +119,9 @@ typedef struct {
     uint8_t total_endpoints;
     uint32_t complete_mask;
     uint32_t truncated_mask;
+    /* Absolute deadlines owned by the component; 0 when no deadline applies. */
+    uint32_t phase_deadline_ms;
+    uint32_t overall_deadline_ms;
 } zigpy_interview_status_t;
 
 typedef struct {
@@ -199,6 +231,23 @@ typedef struct {
 
     zigpy_interview_status_t interview;
     zigpy_device_snapshot_t snapshot;
+    /*
+     * Last snapshot from an interview that reached ZIGPY_INTERVIEW_DONE.
+     *
+     * A re-interview resets `snapshot` when it starts, so without this a failed
+     * or timed-out re-interview would destroy already-known device information.
+     * The application can recover it with zigpy_interview_get_last_good_snapshot.
+     */
+    zigpy_device_snapshot_t last_good_snapshot;
+    bool has_last_good_snapshot;
+
+    uint32_t interview_phase_timeout_ms;
+    uint32_t interview_overall_timeout_ms;
+    uint32_t interview_phase_started_ms;
+    /* Phase the current phase deadline was computed for; used to refresh the
+     * per-phase deadline exactly once per phase change. */
+    zigpy_interview_phase_t interview_deadline_phase;
+
     uint8_t simple_index;
     uint8_t simple_success_count;
     uint8_t identity_endpoint;
@@ -219,11 +268,36 @@ bool zigpy_commissioning_is_active(const zigpy_ctx_t *ctx);
 zigpy_status_t zigpy_interview_begin(zigpy_ctx_t *ctx,
                                      const zigpy_device_ref_t *device,
                                      uint32_t *out_interview_id);
+
+/*
+ * Begin an interview with explicit deadlines.
+ *
+ * `config` may be NULL, in which case the default phase/overall timeouts apply
+ * (identical to zigpy_interview_begin). Deadlines are enforced by zigpy_poll:
+ * when a phase or the overall interview exceeds its deadline the component
+ * cancels the backend request, marks the interview FAILED with
+ * ZIGPY_STATUS_TIMEOUT, and leaves the previous good snapshot recoverable.
+ */
+zigpy_status_t zigpy_interview_begin_ex(zigpy_ctx_t *ctx,
+                                        const zigpy_device_ref_t *device,
+                                        const zigpy_interview_config_t *config,
+                                        uint32_t now_ms,
+                                        uint32_t *out_interview_id);
+
 zigpy_status_t zigpy_interview_cancel(zigpy_ctx_t *ctx, uint32_t interview_id);
 zigpy_status_t zigpy_interview_get_status(const zigpy_ctx_t *ctx,
                                           zigpy_interview_status_t *out);
 zigpy_status_t zigpy_interview_get_snapshot(const zigpy_ctx_t *ctx,
                                             zigpy_device_snapshot_t *out);
+
+/*
+ * Retrieve the most recent successfully completed interview snapshot.
+ *
+ * Returns ZIGPY_STATUS_NOT_FOUND when no interview has ever completed, so
+ * callers can distinguish "no known-good data" from "empty device".
+ */
+zigpy_status_t zigpy_interview_get_last_good_snapshot(
+    const zigpy_ctx_t *ctx, zigpy_device_snapshot_t *out);
 
 zigpy_status_t zigpy_interview_node_desc_complete(
     zigpy_ctx_t *ctx, uint32_t interview_id, zigpy_status_t status,

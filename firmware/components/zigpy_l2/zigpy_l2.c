@@ -31,6 +31,17 @@ static void interview_finish(zigpy_ctx_t *ctx, zigpy_status_t status)
                                    status == ZIGPY_STATUS_TRUNCATED)
                                       ? ZIGPY_INTERVIEW_DONE
                                       : ZIGPY_INTERVIEW_FAILED);
+
+    /* Deadlines only apply while a phase is outstanding. */
+    ctx->interview.phase_deadline_ms = 0u;
+    ctx->interview.overall_deadline_ms = 0u;
+
+    /* Preserve the last interview that produced usable device information, so a
+     * failed or timed-out re-interview cannot destroy existing knowledge. */
+    if (ctx->interview.phase == ZIGPY_INTERVIEW_DONE) {
+        ctx->last_good_snapshot = ctx->snapshot;
+        ctx->has_last_good_snapshot = true;
+    }
 }
 
 static void copy_identity(char *dst, uint32_t *truncated_mask, const char *src)
@@ -220,7 +231,12 @@ static zigpy_status_t start_transaction(zigpy_ctx_t *ctx,
     slot->result.attempts = 1u;
     slot->timeout_ms = timeout_ms;
     slot->deadline_ms = now_ms + timeout_ms;
-    slot->max_retries = retries;
+    /* `attempts` is uint8_t and starts at 1, so a retry limit of 255 could never
+     * be exceeded by that counter: it would wrap to 0 and poll forever. Clamp
+     * the limit into the range the counter can actually reach. */
+    slot->max_retries = (retries > ZIGPY_MAX_RETRIES)
+                            ? (uint8_t)ZIGPY_MAX_RETRIES
+                            : retries;
     *out_id = slot->result.transaction_id;
 
     status = send_transaction(ctx, slot);
@@ -296,8 +312,20 @@ zigpy_status_t zigpy_interview_begin(zigpy_ctx_t *ctx,
                                      const zigpy_device_ref_t *device,
                                      uint32_t *out_interview_id)
 {
+    /* Default deadlines; see zigpy_interview_begin_ex for the bounded form. */
+    return zigpy_interview_begin_ex(ctx, device, NULL, 0u, out_interview_id);
+}
+
+zigpy_status_t zigpy_interview_begin_ex(zigpy_ctx_t *ctx,
+                                        const zigpy_device_ref_t *device,
+                                        const zigpy_interview_config_t *config,
+                                        uint32_t now_ms,
+                                        uint32_t *out_interview_id)
+{
     zigpy_status_t status;
     uint32_t id;
+    uint32_t phase_timeout;
+    uint32_t overall_timeout;
 
     if (ctx == NULL || device == NULL || out_interview_id == NULL ||
         ctx->backend.node_desc_request == NULL ||
@@ -309,6 +337,13 @@ zigpy_status_t zigpy_interview_begin(zigpy_ctx_t *ctx,
         return ZIGPY_STATUS_BUSY;
     }
 
+    phase_timeout = (config != NULL && config->phase_timeout_ms != 0u)
+                        ? config->phase_timeout_ms
+                        : ZIGPY_INTERVIEW_DEFAULT_PHASE_TIMEOUT_MS;
+    overall_timeout = (config != NULL && config->overall_timeout_ms != 0u)
+                          ? config->overall_timeout_ms
+                          : ZIGPY_INTERVIEW_DEFAULT_OVERALL_TIMEOUT_MS;
+
     memset(&ctx->snapshot, 0, sizeof(ctx->snapshot));
     memset(&ctx->interview, 0, sizeof(ctx->interview));
     ctx->snapshot.device = *device;
@@ -316,6 +351,16 @@ zigpy_status_t zigpy_interview_begin(zigpy_ctx_t *ctx,
     ctx->interview.interview_id = id;
     ctx->interview.phase = ZIGPY_INTERVIEW_NODE_DESC;
     ctx->interview.status = ZIGPY_STATUS_BUSY;
+    ctx->interview_phase_timeout_ms = phase_timeout;
+    ctx->interview_overall_timeout_ms = overall_timeout;
+    ctx->interview_phase_started_ms = now_ms;
+    ctx->interview.phase_deadline_ms = now_ms + phase_timeout;
+    ctx->interview.overall_deadline_ms = now_ms + overall_timeout;
+    /* Record the phase this deadline was computed for. Without this the first
+     * poll would see a "phase change" from the zeroed value to NODE_DESC and
+     * hand out a fresh deadline, silently extending every interview by one
+     * phase timeout. */
+    ctx->interview_deadline_phase = ctx->interview.phase;
     ctx->simple_index = 0u;
     ctx->simple_success_count = 0u;
     ctx->identity_endpoint = 0u;
@@ -372,6 +417,19 @@ zigpy_status_t zigpy_interview_get_snapshot(const zigpy_ctx_t *ctx,
         return ctx->interview.status;
     }
     return ZIGPY_STATUS_PARTIAL;
+}
+
+zigpy_status_t zigpy_interview_get_last_good_snapshot(
+    const zigpy_ctx_t *ctx, zigpy_device_snapshot_t *out)
+{
+    if (ctx == NULL || out == NULL) {
+        return ZIGPY_STATUS_INVALID_ARG;
+    }
+    if (!ctx->has_last_good_snapshot) {
+        return ZIGPY_STATUS_NOT_FOUND;
+    }
+    *out = ctx->last_good_snapshot;
+    return ZIGPY_STATUS_OK;
 }
 
 zigpy_status_t zigpy_interview_node_desc_complete(
@@ -761,6 +819,64 @@ zigpy_status_t zigpy_transaction_release(zigpy_ctx_t *ctx,
     return ZIGPY_STATUS_OK;
 }
 
+/*
+ * Enforce interview deadlines.
+ *
+ * Every interview phase only advances when the backend invokes the matching
+ * zigpy_interview_*_complete callback. A backend that never calls back (silent
+ * or sleepy device, dropped frame, backend fault) previously left the interview
+ * active forever, which also blocked all later interviews with ZIGPY_STATUS_BUSY
+ * because interview_is_active() stayed true.
+ *
+ * Returns true when the interview was finished by this call.
+ */
+static bool poll_interview_deadlines(zigpy_ctx_t *ctx, uint32_t now_ms)
+{
+    if (!interview_is_active(ctx)) {
+        return false;
+    }
+
+    /* The phase deadline is refreshed whenever the phase actually changes, so a
+     * long multi-endpoint interview is bounded per step rather than in total. */
+    if (ctx->interview.phase != ctx->interview_deadline_phase) {
+        ctx->interview_deadline_phase = ctx->interview.phase;
+        ctx->interview_phase_started_ms = now_ms;
+        ctx->interview.phase_deadline_ms =
+            (ctx->interview_phase_timeout_ms != 0u)
+                ? now_ms + ctx->interview_phase_timeout_ms
+                : 0u;
+    }
+
+    /*
+     * An interview that has already been asked to stop still needs a finite
+     * exit: the cancel is asynchronous, so allow the phase deadline that was
+     * already running to expire, then close the interview out.
+     */
+    bool phase_expired = ctx->interview.phase_deadline_ms != 0u &&
+                         (int32_t)(now_ms - ctx->interview.phase_deadline_ms) >= 0;
+    bool overall_expired = ctx->interview.overall_deadline_ms != 0u &&
+                           (int32_t)(now_ms - ctx->interview.overall_deadline_ms) >= 0;
+
+    if (!phase_expired && !overall_expired) {
+        return false;
+    }
+
+    if (ctx->backend.cancel_request != NULL) {
+        ctx->backend.cancel_request(ctx->backend_ctx,
+                                    ctx->interview.interview_id, true);
+    }
+
+    /* PARTIAL when some usable evidence was already collected; FAILED when the
+     * device produced nothing. Either way this is a finite, reported outcome,
+     * never a silent hang. */
+    if (ctx->snapshot.complete_mask != 0u) {
+        interview_finish(ctx, ZIGPY_STATUS_PARTIAL);
+    } else {
+        interview_finish(ctx, ZIGPY_STATUS_TIMEOUT);
+    }
+    return true;
+}
+
 void zigpy_poll(zigpy_ctx_t *ctx, uint32_t now_ms)
 {
     size_t i;
@@ -772,6 +888,8 @@ void zigpy_poll(zigpy_ctx_t *ctx, uint32_t now_ms)
         (void)zigpy_commissioning_stop(ctx);
     }
 
+    (void)poll_interview_deadlines(ctx, now_ms);
+
     for (i = 0; i < ZIGPY_MAX_TRANSACTIONS; ++i) {
         zigpy_transaction_slot_t *slot = &ctx->transactions[i];
         zigpy_status_t status;
@@ -781,6 +899,9 @@ void zigpy_poll(zigpy_ctx_t *ctx, uint32_t now_ms)
         if ((int32_t)(now_ms - slot->deadline_ms) < 0) {
             continue;
         }
+        /* Retries are bounded: start_transaction clamps max_retries so that
+         * `attempts` (uint8_t, starting at 1) can always exceed it. The counter
+         * therefore cannot wrap and this loop always terminates. */
         if (slot->result.attempts <= slot->max_retries) {
             slot->result.attempts++;
             slot->deadline_ms = now_ms + slot->timeout_ms;

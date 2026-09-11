@@ -1,0 +1,19 @@
+# One-OS host regression test groups.
+#
+# One group per line: <group-name> <runner-path-relative-to-repo-root>
+#
+# tests/run_all_host_tests.sh reads this manifest and invokes each runner with
+# bash, so the aggregate entry point and CI execute identical commands. Adding a
+# test group means adding a runner and one line here; no dispatcher code changes.
+#
+# Blank lines and lines starting with '#' are ignored.
+ha_l2 tests/run_ha_l2_host_tests.sh
+esphome_l2 tests/esphome_l2/run_host_tests.sh
+theengs_l2 firmware/components/theengs_l2/tests/run_host_tests.sh
+zha_zigpy_l2 tests/host/run_zha_zigpy_host_tests.sh
+openthread_l2 tests/run_openthread_l2_host_test.sh
+kismet_l2 tests/host/run_kismet_l2_host_tests.sh
+nmap_l2 tests/host/run_nmap_l2_tests.sh
+wireshark_l2 tests/host/run_wireshark_l2_tests.sh
+app_diag_protocol tests/host/run_app_diag_protocol_tests.sh
+app_ops tests/host/run_app_ops_tests.sh

@@ -2,10 +2,12 @@
 
 审计日期：2026-09-11。代码基准：`de1afc42b73cb1695ff24bf25c1c77b92fe7958b`。
 
+> 2026-09-11 续作更新见本文末「B0 进展」。B0 已完成并可验证；B1—B3 未开始。
+> 第 8 节「分支处置」记录的 20 个候选分支**已实际删除**，见该节末尾。
+
 ## 当前结论
 
-目前是“硬件基础 + 已汇总的协议组件，等待应用集成”。不能用组件数量推算产品完成百分比。
-`firmware/main/main.c` 仅初始化 LCD、LVGL/触摸并运行 LVGL 定时处理；没有创建设备列表页面，也没有启动扫描、配网或 SD 数据库。
+目前是“硬件基础 + 已汇总的协议组件 + 无 GUI 运行骨架”。不能用组件数量推算产品完成百分比。
 
 | 部分 | 已有代码 | 尚未完成/验证 |
 |---|---|---|
@@ -15,10 +17,10 @@
 | Nmap | 有边界的 LAN 主机/端口/服务发现 | 已联网前提及产品调用链 |
 | Theengs | Ruuvi RAWv2、部分 BTHome v2 被动解码 | 完整设备识别库；加密 BTHome 不支持 |
 | ESPHome | 明文 Native API 子集、BLE GATT 与 NimBLE 后端 | Noise 未实现；Native API command 明确返回不支持，不能宣称可控制 |
-| ZHA / zigpy | quirk/能力转换、后端回调驱动的 interview/ZCL 事务逻辑 | 仓库没有具体原生 Zigbee backend；预留分区不等于协议栈已接通 |
+| ZHA / zigpy | quirk/能力转换、后端回调驱动的 interview/ZCL 事务逻辑 | 仓库没有具体原生 Zigbee backend；预留分区不等于协议栈已接通。interview 超时与重试边界已修，见下 |
 | OpenThread | 网络发现、状态/拓扑、dataset attach、Joiner | 原生栈生命周期由应用负责；不能等同 Matter 控制器 |
 | Matter | 独立研究分支有未合并代码 | 最新构建失败；保留分支单独修复 |
-| 产品应用 | 三份 application 规范 | 配网、Web 管理、SD DB、统一 Device/Entity 页面、控制回执闭环尚未实现 |
+| 产品应用 | 三份 application 规范 + B0 无 GUI 运行骨架 | 配网、Web 管理、SD DB、统一 Device/Entity 页面、控制回执闭环尚未实现 |
 
 这些名称表示有限范围的适配/独立实现，不能理解为完整移植了同名上游产品。
 
@@ -56,12 +58,62 @@
 PR #5 的 ZHA/zigpy 内容已通过 PR #12 纳入，旧 draft 已于 2026-09-11 关闭，不能再次整体合并研究分支。
 保留 beta.1/beta.2 标签和 Releases。
 
-本次未删除远端分支：Git HTTPS 写入缺少凭据，可用 GitHub 连接没有删除 ref 操作。
-维护者可运行 `python3 tools/cleanup_remote_branches.py` 预览；确认后加 `--apply`。
-脚本先镜像备份所有 refs、检查 main 未变化及候选 SHA 未变化，再用逐分支 lease 和 atomic push 删除候选；若远端不支持则停止，不降级为无保护删除。
+### 执行结果（2026-09-11 续作）
+
+删除前重新审计，20 个候选 SHA 与清单完全一致，未出现新增独有成果：
+
+- 3 个 smoke/cleanup 分支的树与 `main`/`v0.1.0-beta.2` 标签中已有提交**逐字节相同**
+  （`beta/smoke-v0.1.0-beta.2` 与标签提交树哈希同为 `d3aabc9d`，且父提交相同）。
+- 其余分支剩余差异只有分支任务说明 `AGENTS.md`、已被集成配置取代的 CMake/CI 子集，
+  以及删除 smoke 应用的提交。
+
+已完成全量镜像备份后，用逐分支 `--force-with-lease` 加 `--atomic` 一次性删除 20 个 ref。
+当前远端仅剩 `main` 与 `research/matter-chip-tool-l2-api`，两个 beta 标签与 Releases 完好。
+脚本 `tools/cleanup_remote_branches.py` 保留，重复执行只会报告候选已不存在。
 
 ## 当前开发顺序（用户已更新）
 
 先完成无 GUI 的底层和应用闭环，最后接 GUI。详细任务、依赖、验收与新增边界缺口见 [GUI 之前的开发任务书](pre-ui-development.md)。之前“先接屏幕设备列表”的建议已被此顺序替代。
 
-继续遵守三份 application 文档的最终产品行为：生产识别库只放 SD、未知设备不丢弃、最终使用统一 HA 风格 Device/Entity UI。每一步记录提交 SHA、host/CI 证据及单列的实板验收结果。
+继续遵守三份 application 文档的最终产品行为：生产识别库只放 SD、未知设备不丢弃、最终使用统一 HA Device/Entity UI。每一步记录提交 SHA、host/CI 证据及单列的实板验收结果。
+
+## B0 进展（2026-09-11）
+
+分支 `feat/b0-diag-entry`，基于 main `c175db5`。
+
+### 已完成并验证
+
+| 交付 | 提交 |
+|---|---|
+| 统一 host 测试入口 + 无平台依赖诊断协议层 | `4a6bb5a` |
+| 修正 dispatcher（清单文件替代 bash 数组）+ 操作门 `app_ops` | `d9cf5a1` |
+| Zigbee interview 超时与重试边界修复 | `549562e` |
+| 无 GUI 运行骨架：worker、串口入口、资源报告 | `42beb6c` |
+| 修正诊断错误名、补声明、修 interview 首次 poll 误刷新 deadline | `7c36791` |
+
+**CI 证据**（run `34606978491`，两者均 success）：
+
+- host tests：10 组全部通过，`failed groups: 0`。
+  新增组 `app_diag_protocol`（109 checks, 0 failures）与 `app_ops`（109 checks, 0 failures）。
+- build：ESP-IDF v6.1 / esp32c6 固件构建成功（约 4 分 20 秒）。
+
+### B0 能力现状
+
+- `tests/run_all_host_tests.sh` 是唯一入口，读取 `tests/host-test-groups.txt` 清单并调用
+  各组原有 runner，不复制测试。CI 先 `--list` 再执行同一入口。
+- 串口入口支持 `ping/version/status/resources/scan/cancel/devices/entities/control`，
+  响应含 request id、阶段、错误、partial/truncated 标志。
+- 资源报告含 free heap、min free heap、largest free block、worker/console 栈余量、
+  队列丢弃数、generation 与阶段进度；不含任何凭据。
+- **扫描阶段体尚未实现**：每个阶段记为 `skipped` 并返回 `not_implemented`，
+  `partial=1`。因此现在**不能**声称已经跑通“真实扫描→设备状态→串口输出”。
+- `control` 返回 `not_implemented`，不伪装成控制成功。
+- Zigbee 修复已加回归测试：无回调 interview 超时收尾、`retries=255` 不回绕、
+  失败 re-interview 保留 last-known-good。
+
+### 仍然阻塞
+
+- **B1—B3 未开始**：原生栈生命周期与互斥、真实 Wi-Fi/BLE 扫描与解析、
+  联网后 mDNS/SSDP/Nmap、Device/Entity/State 去重与离线状态。
+- **实板验证全部待办**：本轮无实板，未烧录、未做射频互操作、未测量内存峰值。
+- Matter 独立构建仍未修复（在 `research/matter-chip-tool-l2-api`）。
