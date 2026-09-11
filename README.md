@@ -1,6 +1,6 @@
 # One-OS
 
-One-OS is the clean firmware foundation for the NearBy One NEXT handheld platform.
+One-OS is an ESP32-C6 firmware foundation with independent protocol components for the NearBy One NEXT handheld platform. The Nearby Devices product application is not yet integrated.
 
 Target board: **Waveshare ESP32-C6-Touch-LCD-1.9**  
 Framework: **ESP-IDF + FreeRTOS + LVGL**  
@@ -8,7 +8,7 @@ MCU: **ESP32-C6**
 Display: **170×320 ST7789V2**  
 Touch: **CST816**
 
-This repository starts from the hardware and native platform layer. It intentionally does **not** import the previous scanner architecture, compatibility layers, radio orchestration, discovery pipeline, or project-specific Level-2 APIs.
+The current main branch contains the board/LVGL foundation and eight non-Matter Level-2 capability families (ten components). It does not yet connect these components into a scanner/controller application. See [the development status and cleanup audit](docs/development-status.md) for implemented capabilities, gaps, validation evidence and branch disposition.
 
 ## Foundation rules
 
@@ -42,20 +42,23 @@ Agents implementing application integration must read all three documents before
 
 ```text
 firmware/
-├─ CMakeLists.txt
-├─ sdkconfig.defaults
-├─ partitions_8mb.csv
-├─ components/
-│  ├─ board/
-│  │  ├─ include/board.h
-│  │  ├─ board.c
-│  │  ├─ touch.c
-│  │  └─ storage.c
-│  └─ lvgl_port/
-│     ├─ include/lvgl_port.h
-│     └─ lvgl_port.c
-└─ main/
-   └─ main.c
+  main/                   Minimal display/touch startup; no product UI yet
+  components/
+    board/                Board pins, shared SPI, LCD, touch, SD
+    lvgl_port/            LVGL display/input binding
+    ha_core/              Device / Entity / State model
+    ha_discovery_l2/       mDNS / SSDP
+    esphome_l2/            Native API subset / BLE GATT
+    theengs_l2/            Selected passive BLE decoders
+    zha_l2/               Selected quirks and capability transforms
+    zigpy_l2/             Backend-driven Zigbee transactions
+    openthread_l2/         Native OpenThread network operations
+    kismet_l2/            Wi-Fi / BLE scan sessions and trackers
+    nmap_l2/              Bounded LAN discovery
+    wireshark_l2/         Wi-Fi / BLE bounded parsers
+docs/application/         Product requirements, not implementation evidence
+docs/research/            Capability scope and provenance
+tests/, tools/            Host regression tests
 ```
 
 The released `v0.1.0-beta.1` and `v0.1.0-beta.2` hardware smoke images remain available from GitHub Releases as archived board/radio/storage validation builds. The smoke-test application is not part of the current production source baseline.
@@ -92,7 +95,7 @@ Application
 ├─ LVGL
 ├─ NimBLE / lwIP / IEEE 802.15.4 when needed
 ├─ board BSP for board-specific hardware
-└─ future independent project APIs
+└─ independent project APIs (present; application composition pending)
 ```
 
 The current `app_main()` is intentionally small: initialize the board display, bind LVGL to LCD/touch, then run `lv_timer_handler()` from one FreeRTOS owner task.
@@ -121,31 +124,22 @@ LVGL remains pinned to the proven v8.3.11 baseline while the platform architectu
 
 ## CI and releases
 
-`build.yml` runs on pushes and pull requests with read-only repository permissions and verifies the ESP32-C6 firmware build.
+`build.yml` runs on pushes to main and pull requests with read-only repository permissions. It runs eight host-test groups and an ESP-IDF v6.1 ESP32-C6 firmware build.
 
 `release.yml` runs only for `v*` tags. It builds the tagged source, creates a merged raw image containing bootloader + partition table + application, publishes a SHA-256 checksum, and creates a GitHub Release using the tag name.
 
-## Current foundation scope
+## Current implementation scope
 
-The clean baseline includes:
+The board/LVGL foundation and non-Matter components listed above are present in main.
+The released beta images preserve earlier hardware smoke applications; current
+`app_main()` only initializes LCD/touch and services LVGL. SD mounting, radio
+initialization, discovery scheduling and product UI are not wired into startup.
 
-- board pin definitions and shared-bus ownership;
-- ST7789V2 initialization;
-- CST816 touch input;
-- SD/FATFS attachment on the shared SPI bus;
-- thin LVGL display/input binding;
-- minimal ESP-IDF/FreeRTOS startup;
-- native Wi-Fi, NimBLE and IEEE 802.15.4 capabilities enabled in configuration for future applications/APIs.
+Still pending: application composition, persistent Wi-Fi provisioning, SoftAP/Web
+Management, SD Device DB reader/importer/matcher, Device/Entity UI and confirmed
+control/state updates. ESPHome authenticated Native API control and a native
+Zigbee backend also remain gaps. Matter is isolated on its research branch and
+has not passed its latest firmware build.
 
-Not part of the foundation:
-
-- scanner/discovery product applications;
-- radio lifecycle abstraction layers;
-- scan/session/coordinator frameworks;
-- Kismet/Wireshark/Home Assistant APIs;
-- old `nearby_*` compatibility APIs;
-- recognition databases and product semantics;
-- previous application UI screens;
-- web management and scan pipelines.
-
-Future Level-2 APIs should be introduced one independent capability family at a time, with no cross-family dependency or type coupling.
+Preserve peer-family independence; compose capabilities in the application.
+See [development status](docs/development-status.md) before continuing development.
