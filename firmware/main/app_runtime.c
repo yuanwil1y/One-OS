@@ -469,7 +469,15 @@ static app_provision_ops_t portal_ops(void)
 static void portal_setup(void)
 {
     app_provision_ops_t ops = portal_ops();
-    app_db_import_io_t io = app_device_db_sd_ops();
+    /*
+     * The import reads through the SAME SD adapter as the reader, wrapped so the import's
+     * extra ranged read is served by the same held file handle.
+     *
+     * Two adapters over one card would mean two file handles and two ideas about the
+     * corpus path - and the whole point of the replace sequence is that the reader is
+     * closed before the renames. One adapter is what makes "closed" mean closed.
+     */
+    app_db_import_io_t io = app_device_db_sd_import_ops();
     app_provision_config_t config;
     char path[APP_DB_IMPORT_PATH_MAX];
 
