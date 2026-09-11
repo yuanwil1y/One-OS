@@ -78,7 +78,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B3 Device/Entity 状态 | 完成 | 通过 | 通过 | 未做 | — |
 | B4 DB 格式/工具 | 完成 | 通过 | 通过 | 不适用 | — |
 | **B5 SD 读取/识别/配方** | **完成** | **通过** | **通过** | **未做** | 见 §4 |
-| B6 配网与导入后端 | 未开始 | — | — | — | 全部 |
+| **B6 配网与导入后端** | **进行中** | **通过** | **通过** | **未做** | HTTP 路由与临时 APSTA 未接；见 §4b |
 | B7 BLE GATT / ESPHome | 部分（已有组件） | 通过 | 通过 | 未做 | Noise 认证未实现；GATT 交接未接应用 |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator；无应用通路 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
@@ -116,6 +116,28 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 4. **`thread` / `zigbee` 阶段仍是空实现**，记 `skipped` + 原因，归 B8/B9。
 5. **Matter 构建未修**，仍在 `research/matter-chip-tool-l2-api`。
 
+## 4b. B6 进度（进行中）
+
+已完成（代码 + host 测试，实板全部未做）：
+
+| 交付 | 说明 | 测试组 |
+|---|---|---|
+| `app_db_import.{c,h}` | 数据库替换状态机：分块流式写入、双重长度校验、容量与空间预检、`.part` 清理、**全量校验后才替换**、失败回滚；FAT 无原子 rename，因此序列设计为任意中断点都可恢复 | `app_db_import` 150 checks |
+| `app_portal.{c,h}` | 请求/响应线层：表单解码（含 `%00` 拒绝）、Content-Length 解析、JSON 构建（SSID 十六进制、无密码字段、缓冲区不足则**什么都不写**）、临时 AP 密码生成 | `app_portal` 95 checks |
+| `app_provision.{c,h}` | 会话编排：操作门互斥、射频交接顺序与回滚、会话超时、**替换期间关闭并重开 reader**、令牌恒定时间比较 | `app_provision` 120 checks |
+
+### B6 未完成项
+
+1. **HTTP 路由与处理器**（`/api/status`、`/api/wifi/scan`、`/api/wifi/connect`、`/api/db/upload`、
+   可选 `/api/portal/finish`）。线层与会话逻辑已就绪，处理器应当是薄传输层。
+2. **临时 APSTA 会话**：`app_wifi` 目前只有 STA；需要 AP 启动/停止与 STA 恢复的配对实现。
+3. **AP 密码的本地出口**：按产品规则只在设备自身呈现与本地串口输出，不得进入日志或
+   `/api/status`。目前生成逻辑已实现并测试，出口未接。
+4. **NVS 凭据持久化**：`app_wifi` 已实现 `wifi_mgr_set_credentials`/`clear`/启动加载，
+   但"连接失败后保留凭据以便重试"与"版本标记"未验证。
+5. **实板全部未做**：无板、无浏览器、无真实 HTTP 服务器。
+
+
 ## 5. 本轮修掉的四个边界问题
 
 任务书第三节的四项，逐项证据与残留风险：
@@ -145,7 +167,12 @@ cd D:\OS\One-OS
 .\tools\local\run-host-tests.ps1
 ```
 
-结果：**13 组通过，2 组因本机缺 POSIX socket 头失败（esphome_l2、nmap_l2），后者只在 CI 验证。**
+结果：**16 组通过，2 组因本机缺 POSIX socket 头失败（esphome_l2、nmap_l2），后者只在 CI 验证。**
+
+**本机通过不等于 CI 通过**：本机无法编译 ESP-IDF 专属文件（如 `app_scan_native.c`），
+目标构建只在 CI 进行。本轮就出现过本机 15 组全绿、而 CI 目标构建失败的两次
+（`stopped` 未初始化、`stopped` 重复定义），原因都是 host 测试覆盖不到那个文件。
+**改动任何 host 不编译的文件后，必须等 CI 目标构建通过再认为完成。**
 
 各应用组 checks 数：
 
@@ -156,8 +183,13 @@ cd D:\OS\One-OS
 | `app_scan` | 136 | 0 |
 | `app_device` | 181 | 0 |
 | `app_device_db` | 161 | 0 |
+| `app_db_import` | 150 | 0 |
+| `app_portal` | 95 | 0 |
+| `app_provision` | 120 | 0 |
 | `device_db_python` | 36 | 0 |
 | `device_db_format` | 200 | 0 |
+
+（16 组在本机通过；`esphome_l2` 与 `nmap_l2` 见上文。）
 
 ### CI
 
