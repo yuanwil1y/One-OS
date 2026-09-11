@@ -10,3 +10,11 @@ firmware/dependencies.lock
 .vscode/
 .idea/
 *.swp
+
+# Local agent scratch (CI logs, helper scripts, PR drafts)
+.ci-logs/
+getjobs.js
+pr-*.md
+msg*.txt
+*-commitmsg.txt
+.git-askpass.cmd
