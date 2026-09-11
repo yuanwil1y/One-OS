@@ -55,8 +55,6 @@ static bool s_started;
 /* Set by app_diag_console so the resource report can include its stack. */
 static TaskHandle_t s_console_task;
 
-void app_runtime_set_console_task(TaskHandle_t task);
-
 /* ---------------- helpers ---------------- */
 
 static void lock(void)
@@ -480,6 +478,8 @@ static app_diag_response_t execute_request(const app_diag_request_t *request)
     case APP_DIAG_CMD_CANCEL:
         response = make_response(request, APP_DIAG_OK);
         if (app_ops_scan_cancel(&s_ops) != APP_OPS_OK) {
+            /* Nothing was running: say so rather than reporting a successful
+             * cancellation of a scan that never existed. */
             response.error = APP_DIAG_ERR_NOT_ACTIVE;
             response.detail = "no_active_scan";
         }

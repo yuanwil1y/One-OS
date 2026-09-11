@@ -112,6 +112,7 @@ const char *app_diag_error_name(app_diag_error_t error)
     case APP_DIAG_ERR_INVALID_ARGUMENT:return "invalid_argument";
     case APP_DIAG_ERR_BUSY:            return "busy";
     case APP_DIAG_ERR_NOT_FOUND:       return "not_found";
+    case APP_DIAG_ERR_NOT_ACTIVE:      return "not_active";
     case APP_DIAG_ERR_UNSUPPORTED:     return "unsupported";
     case APP_DIAG_ERR_NOT_IMPLEMENTED: return "not_implemented";
     case APP_DIAG_ERR_CAPACITY:        return "capacity";

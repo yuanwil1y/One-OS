@@ -26,6 +26,8 @@
 #include "app_diag_protocol.h"
 #include "app_ops.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "ha_core.h"
 
 #ifdef __cplusplus
@@ -101,6 +103,12 @@ esp_err_t app_runtime_request_control(uint32_t request_id,
 
 /* Current operation state, readable from any task. */
 app_op_state_t app_runtime_op_state(void);
+
+/*
+ * Register the console task so the resource report can include its stack
+ * high-water mark. Purely diagnostic; passing NULL simply omits the value.
+ */
+void app_runtime_set_console_task(TaskHandle_t task);
 
 #ifdef __cplusplus
 }

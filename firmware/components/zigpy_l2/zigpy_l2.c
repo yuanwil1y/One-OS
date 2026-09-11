@@ -356,6 +356,11 @@ zigpy_status_t zigpy_interview_begin_ex(zigpy_ctx_t *ctx,
     ctx->interview_phase_started_ms = now_ms;
     ctx->interview.phase_deadline_ms = now_ms + phase_timeout;
     ctx->interview.overall_deadline_ms = now_ms + overall_timeout;
+    /* Record the phase this deadline was computed for. Without this the first
+     * poll would see a "phase change" from the zeroed value to NODE_DESC and
+     * hand out a fresh deadline, silently extending every interview by one
+     * phase timeout. */
+    ctx->interview_deadline_phase = ctx->interview.phase;
     ctx->simple_index = 0u;
     ctx->simple_success_count = 0u;
     ctx->identity_endpoint = 0u;
