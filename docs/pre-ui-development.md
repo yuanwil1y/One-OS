@@ -176,3 +176,27 @@ GUI 开始前，至少完成目标版本所需后端的 B10/B11；未支持协�
 `control` 同样返回 `not_implemented`。因此 B0 只完成了“构建与诊断入口”，
 B1—B3 的“真实扫描→设备状态→串口输出”尚未跑通，不得宣称已完成。
 本轮无实板，所有实板验收仍待办。
+
+**后续修正**：B0 的“完成”一度被笼统表述为已跑通，实际只覆盖诊断骨架。
+准确区分见 [development-status.md](development-status.md) 的「B0 能力现状（修正后的准确表述）」：
+诊断骨架已实现且 host 测试通过；真实后端调用在 B0 阶段全部为空实现；
+资源报告字段已实现但**从未测量**，不得用构建日志推断资源余量。
+
+## 执行记录：B1—B3（2026-09-11）
+
+分支 `feat/b1-b3-headless-scan`。CI run `34612225371` 全绿：ESP-IDF v6.1 / esp32c6 构建成功，
+**12 组 host tests 全通过**（`failed groups: 0`），新增 `app_scan` 114 checks 与
+`app_device` 118 checks。
+
+已交付：`app_wifi`（STA 生命周期与扫描交接）、`app_scan`（阶段策略 + 有界证据）、
+`app_scan_native`（Kismet/Wireshark/mDNS/SSDP/Nmap 真实调用）、`app_device`
+（应用绑定表 + 代次 + 只读约束），以及 `kismet_wifi_tracker_get_device_ssid()` 与
+`ha_core_device_remove()` 两个必要补充。
+
+**阶段实现状态（逐项）**：`wifi_rf`、`ble_rf`、`mdns`、`ssdp`、`lan_hosts`、`materialize`
+已接入真实后端；`lan_services`、`thread`、`zigbee`、`enrichment` **仍为空实现**，
+记为 `skipped` 并携带明确原因，因此局部扫描不会被呈现为全协议完成。
+
+**实板验证仍全部待办**：未烧录、未做射频互操作、未测量内存峰值、未验证串口真实输出与
+有线恢复行为。CI 通过只证明编译与 host 规则测试，不能替代实板结论。
+

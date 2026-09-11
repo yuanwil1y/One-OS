@@ -8,7 +8,7 @@ MCU: **ESP32-C6**
 Display: **170×320 ST7789V2**  
 Touch: **CST816**
 
-The current main branch contains the board/LVGL foundation and eight non-Matter Level-2 capability families (ten components). It does not yet connect these components into a scanner/controller application. See [the development status and cleanup audit](docs/development-status.md) for implemented capabilities, gaps, validation evidence and branch disposition.
+The current main branch contains the board/LVGL foundation and eight non-Matter Level-2 capability families (ten components), plus the headless application runtime that composes them (Wi-Fi/BLE RF scanning and parsing, LAN discovery, and the Device/Entity binding table). It is not yet a complete Nearby Devices product: recognition, provisioning, control and the UI are still missing. See [the development status and cleanup audit](docs/development-status.md) for implemented capabilities, per-stage gaps, validation evidence and branch disposition.
 
 ## Foundation rules
 
@@ -135,15 +135,23 @@ LVGL remains pinned to the proven v8.3.11 baseline while the platform architectu
 ## Current implementation scope
 
 The board/LVGL foundation and non-Matter components listed above are present in main.
-The released beta images preserve earlier hardware smoke applications; current
-`app_main()` only initializes LCD/touch and services LVGL. SD mounting, radio
-initialization, discovery scheduling and product UI are not wired into startup.
+The released beta images preserve earlier hardware smoke applications.
 
-Still pending: application composition, persistent Wi-Fi provisioning, SoftAP/Web
-Management, SD Device DB reader/importer/matcher, Device/Entity UI and confirmed
-control/state updates. ESPHome authenticated Native API control and a native
-Zigbee backend also remain gaps. Matter is isolated on its research branch and
-has not passed its latest firmware build.
+The headless runtime now exists (task list B0-B3): a serial diagnostic entry point,
+an application operation gate, real Wi-Fi/BLE RF scanning through the Kismet
+sessions with Wireshark parsing, mDNS/SSDP/Nmap LAN stages, and an
+application Device/Entity binding table over `ha_core`. See
+[development status](docs/development-status.md) for exactly which stages call a
+real backend and which are still empty.
+
+Still not wired: the SD Device DB reader/matcher, persistent Wi-Fi provisioning,
+SoftAP/Web Management, the product UI, LAN service probing, Thread/Zigbee native
+backends, ESPHome authenticated control, and control dispatch with confirmed
+state. `control` currently reports `not_implemented` rather than succeeding.
+
+The resource report fields (free heap, largest block, stack high-water) are
+implemented but have **never been measured on hardware**; do not infer resource
+headroom from a build log.
 
 Preserve peer-family independence; compose capabilities in the application.
 See [development status](docs/development-status.md) before continuing development.
