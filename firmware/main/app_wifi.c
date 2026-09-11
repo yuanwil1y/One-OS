@@ -927,6 +927,27 @@ bool wifi_mgr_ap_is_up(void)
     return up;
 }
 
+bool wifi_mgr_state_is_scannable(void)
+{
+    bool scannable;
+
+    lock_init();
+    lock();
+    /*
+     * The driver must be initialised AND owned by the station. The three exclusions are
+     * each a way the driver is either absent or somebody else's:
+     *   - released_for_scan: a Kismet session has it;
+     *   - quarantined: a session that would not exit has it;
+     *   - the AP is up: the portal's own access point has it.
+     * Starting an active scan in any of those cases would either fail or disturb the
+     * owner - and the portal must never take the radio from the AP it is serving.
+     */
+    scannable = s_ctx.driver_up && !s_ctx.released_for_scan && !s_ctx.quarantined &&
+                !s_ap_up;
+    unlock();
+    return scannable;
+}
+
 esp_err_t wifi_mgr_ap_ipv4(char *out, size_t out_size)
 {
     esp_netif_ip_info_t info;

@@ -13,6 +13,8 @@ idf_component_register(
         "app_portal.c"
         "app_provision.c"
         "app_control.c"
+        "app_http_portal.c"
+        "app_portal_native.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"
@@ -31,6 +33,7 @@ idf_component_register(
         esp_wifi
         esp_event
         esp_netif
+        esp_http_server
         nvs_flash
         lwip
         fatfs

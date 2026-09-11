@@ -280,6 +280,31 @@ const char *app_runtime_db_path(void)
     return s_db_sd.path;
 }
 
+bool app_runtime_db_info(uint32_t *out_content_version, uint32_t *out_profile_count)
+{
+    /*
+     * Zeroed first, always. A caller that ignores the return value then reports "no
+     * version" rather than the previous corpus's version - which would be a status
+     * document describing a database the card no longer holds.
+     */
+    if (out_content_version != NULL) {
+        *out_content_version = 0u;
+    }
+    if (out_profile_count != NULL) {
+        *out_profile_count = 0u;
+    }
+    if (s_db.state != APP_DB_STATE_READY) {
+        return false;
+    }
+    if (out_content_version != NULL) {
+        *out_content_version = s_db.content_version;
+    }
+    if (out_profile_count != NULL) {
+        *out_profile_count = s_db.profile_count;
+    }
+    return true;
+}
+
 /*
  * The enrichment stage body.
  *

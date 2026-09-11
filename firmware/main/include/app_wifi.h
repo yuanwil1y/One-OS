@@ -182,6 +182,16 @@ esp_err_t wifi_mgr_ap_ipv4(char *out, size_t out_size);
 /* True while the soft AP is running. */
 bool wifi_mgr_ap_is_up(void);
 
+/*
+ * May an active scan be started right now?
+ *
+ * True only while the station owns the driver: initialised, not deliberately released
+ * for a scan or for the portal's AP, and not quarantined. The provisioning portal's
+ * network list uses this, because an active scan needs the driver in station mode and the
+ * portal must never take it from the AP it is serving.
+ */
+bool wifi_mgr_state_is_scannable(void);
+
 #ifdef __cplusplus
 }
 #endif
