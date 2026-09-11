@@ -172,6 +172,24 @@ esp_err_t kismet_wifi_tracker_get_device(const kismet_wifi_tracker_t *tracker,
 esp_err_t kismet_wifi_tracker_get_ssid(const kismet_wifi_tracker_t *tracker,
                                        size_t index,
                                        kismet_wifi_ssid_t *out_ssid);
+
+/*
+ * Look up the SSID currently associated with one device (BSSID).
+ *
+ * A device and its SSID live in separate bounded tables joined by links, so the
+ * application cannot name an AP from the device list alone. Returns
+ * ESP_ERR_NOT_FOUND when the device is unknown, has no SSID link, or its linked
+ * SSID is a hidden one (ssid_len 0), in which case *out_len is 0.
+ *
+ * `out_ssid` is the caller's buffer of at least KISMET_WIFI_MAX_SSID_LEN bytes;
+ * bytes are copied, never referenced.
+ */
+esp_err_t kismet_wifi_tracker_get_device_ssid(const kismet_wifi_tracker_t *tracker,
+                                              const uint8_t mac[6],
+                                              uint8_t *out_ssid,
+                                              size_t out_capacity,
+                                              uint8_t *out_len,
+                                              bool *out_hidden);
 esp_err_t kismet_wifi_tracker_get_relation(const kismet_wifi_tracker_t *tracker,
                                            size_t index,
                                            kismet_wifi_relation_t *out_relation);

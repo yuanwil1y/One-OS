@@ -16,8 +16,13 @@
 
 #include "app_runtime.h"
 
+#include <stdio.h>
 #include <string.h>
 
+#include "app_device.h"
+#include "app_scan.h"
+#include "app_scan_native.h"
+#include "app_wifi.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -30,9 +35,11 @@
 static const char *TAG = "app_runtime";
 
 #define APP_RUNTIME_QUEUE_DEPTH 4u
-#define APP_RUNTIME_WORKER_STACK 6144u
+#define APP_RUNTIME_WORKER_STACK 8192u
 #define APP_RUNTIME_WORKER_PRIO 5u
-#define APP_RUNTIME_DEFAULT_TIMEOUT_MS 30000u
+/* Whole-scan budget. Individual stages have their own shorter timeouts; this is
+ * the outer bound that keeps one request from occupying the worker forever. */
+#define APP_RUNTIME_DEFAULT_SCAN_BUDGET_MS 45000u
 
 /* One queued unit of work. `result` lives in the submitter's stack frame and
  * `done` is signalled by the worker after writing it, so the submitter stays
@@ -51,6 +58,15 @@ static app_ops_t s_ops;
 static app_ops_t s_ops_mirror;
 static uint32_t s_queue_drops;
 static bool s_started;
+
+/*
+ * Scan working state. Only the worker task touches these, and the worker is the
+ * only task that runs a scan, so no lock is needed. The evidence store is large
+ * enough to justify keeping it off the worker's stack.
+ */
+static app_scan_evidence_t s_evidence;
+static app_scan_native_stats_t s_scan_stats;
+static app_scan_inputs_t s_scan_inputs;
 
 /* Set by app_diag_console so the resource report can include its stack. */
 static TaskHandle_t s_console_task;
@@ -167,24 +183,31 @@ esp_err_t app_runtime_write_devices(char *out, size_t out_size,
     }
     out[0] = '\0';
 
-    count = ha_core_device_count();
+    count = app_device_count();
 
     for (size_t i = 0u; i < count; ++i) {
-        const ha_device_t *device = ha_core_device_at(i);
+        const app_device_binding_t *binding = app_device_at(i);
+        const ha_device_t *device;
         char line[288];
         int written;
 
-        if (device == NULL) {
+        if (binding == NULL) {
             continue;
         }
+        device = ha_core_device_get(binding->ha_device_id);
 
         written = snprintf(line, sizeof(line),
-                           "device id=%s name=%s manufacturer=%s model=%s entities=%u\n",
-                           device->id,
-                           device->name[0] != '\0' ? device->name : "-",
-                           device->manufacturer[0] != '\0' ? device->manufacturer : "-",
-                           device->model[0] != '\0' ? device->model : "-",
-                           (unsigned)ha_core_entity_count_for_device(device->id));
+                           "device id=%s name=%s protocol=%s recognition=%s availability=%s"
+                           " sources=%u entities=%u signal=%d generation=%lu\n",
+                           binding->device_id,
+                           (device != NULL && device->name[0] != '\0') ? device->name : "-",
+                           binding->protocol_label[0] != '\0' ? binding->protocol_label : "-",
+                           app_recognition_name(binding->recognition),
+                           app_availability_name(binding->availability),
+                           (unsigned)binding->sources,
+                           (unsigned)app_entity_count_for_device(binding->device_id),
+                           binding->has_signal ? (int)binding->signal_dbm : 0,
+                           (unsigned long)binding->last_generation);
         if (written < 0 || (size_t)written >= sizeof(line)) {
             truncated = true;
             continue;
@@ -218,22 +241,26 @@ esp_err_t app_runtime_write_devices(char *out, size_t out_size,
 }
 
 static size_t append_entity(char *out, size_t out_size, size_t used,
-                            const ha_entity_t *entity, const char *device_id,
-                            bool *truncated)
+                            const app_entity_binding_t *binding, bool *truncated)
 {
     const ha_state_t *state;
+    const app_device_binding_t *device;
     char line[288];
     int written;
 
-    state = ha_core_state_get(entity->entity_id);
+    state = ha_core_state_get(binding->entity_id);
+    device = app_device_find(binding->device_id);
+
     written = snprintf(line, sizeof(line),
-                       "entity id=%s device=%s state=%s unit=%s available=%u\n",
-                       entity->entity_id, device_id,
+                       "entity id=%s device=%s state=%s unit=%s writable=%u available=%u\n",
+                       binding->entity_id, binding->device_id,
                        state != NULL ? state->state : "unknown",
-                       entity->unit_of_measurement[0] != '\0'
-                           ? entity->unit_of_measurement
-                           : "-",
-                       (unsigned)(entity->available ? 1u : 0u));
+                       binding->unit[0] != '\0' ? binding->unit : "-",
+                       (unsigned)(binding->writable ? 1u : 0u),
+                       (unsigned)((device != NULL &&
+                                   device->availability == APP_AVAILABILITY_ONLINE)
+                                      ? 1u
+                                      : 0u));
     if (written < 0 || (size_t)written >= sizeof(line)) {
         *truncated = true;
         return used;
@@ -254,44 +281,34 @@ esp_err_t app_runtime_write_entities(const char *device_id, char *out,
 {
     size_t used = 0u;
     bool truncated = false;
+    size_t count;
 
     if (out == NULL || out_size == 0u) {
         return ESP_ERR_INVALID_ARG;
     }
     out[0] = '\0';
 
-    if (device_id == NULL || device_id[0] == '\0') {
-        size_t devices = ha_core_device_count();
+    count = app_entity_count();
+    for (size_t i = 0u; i < count; ++i) {
+        const app_entity_binding_t *binding = app_entity_at(i);
 
-        for (size_t d = 0u; d < devices; ++d) {
-            const ha_device_t *device = ha_core_device_at(d);
-            size_t entities;
-
-            if (device == NULL) {
-                continue;
-            }
-            entities = ha_core_entity_count_for_device(device->id);
-            for (size_t e = 0u; e < entities; ++e) {
-                const ha_entity_t *entity =
-                    ha_core_entity_at_for_device(device->id, e);
-                if (entity == NULL) {
-                    continue;
-                }
-                used = append_entity(out, out_size, used, entity, device->id,
-                                     &truncated);
-            }
+        if (binding == NULL) {
+            continue;
         }
-    } else {
-        size_t entities = ha_core_entity_count_for_device(device_id);
+        if (device_id != NULL && device_id[0] != '\0' &&
+            strcmp(binding->device_id, device_id) != 0) {
+            continue;
+        }
+        used = append_entity(out, out_size, used, binding, &truncated);
+    }
 
-        for (size_t e = 0u; e < entities; ++e) {
-            const ha_entity_t *entity =
-                ha_core_entity_at_for_device(device_id, e);
-            if (entity == NULL) {
-                continue;
-            }
-            used = append_entity(out, out_size, used, entity, device_id,
-                                 &truncated);
+    if (used == 0u) {
+        static const char none[] = "no entities\n";
+        if (sizeof(none) <= out_size) {
+            memcpy(out, none, sizeof(none));
+            used = sizeof(none) - 1u;
+        } else {
+            truncated = true;
         }
     }
 
@@ -361,19 +378,106 @@ static app_diag_stage_state_t diag_state_of(app_stage_state_t state)
 /*
  * Run one scan stage.
  *
- * B0 wires the lifecycle only; the RF/LAN stage bodies arrive with B1..B3.
- * A stage whose body is not implemented is recorded as SKIPPED and reported as
- * NOT_IMPLEMENTED, so an unfinished scan can never be mistaken for a completed
- * one.
+ * The stage policy decides first whether the stage is applicable at all (no IP,
+ * missing credentials, protocol backend not wired). Only then is the native body
+ * invoked. Anything that did not actually run is recorded as SKIPPED or FAILED,
+ * never as DONE, so a partial scan cannot be mistaken for a complete one.
+ *
+ * `s_scan_inputs` is refreshed from live state before the stage runs.
  */
-static app_diag_error_t run_scan_stage(app_scan_stage_t stage)
+static app_diag_error_t run_scan_stage(app_scan_stage_t stage,
+                                       app_scan_evidence_t *ev,
+                                       const app_scan_native_config_t *cfg,
+                                       app_scan_native_stats_t *stats)
 {
+    app_scan_stage_plan_t plan;
+    esp_err_t err;
+
+    plan = app_scan_plan_stage(&s_scan_inputs, stage);
+    if (plan.action != APP_STAGE_ACTION_RUN) {
+        /* Not applicable now. Record the reason and move on: a skipped stage
+         * must not be reported as an error the caller has to guess at. */
+        if (app_ops_stage_begin(&s_ops, stage) == APP_OPS_OK) {
+            (void)app_ops_stage_end(&s_ops, stage, plan.terminal_state);
+        }
+        if (plan.action == APP_STAGE_ACTION_REJECTED) {
+            return APP_DIAG_ERR_INTERNAL;
+        }
+        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    }
+
     if (app_ops_stage_begin(&s_ops, stage) != APP_OPS_OK) {
         return APP_DIAG_ERR_CANCELED;
     }
 
-    (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
-    return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    app_scan_native_request_cancel(app_ops_scan_is_canceled(&s_ops));
+
+    switch (stage) {
+    case APP_STAGE_WIFI_RF:
+        err = app_scan_native_wifi_rf(ev, cfg, stats);
+        /* LAN applicability changed: the STA handover result decides it. */
+        s_scan_inputs.has_ip = wifi_mgr_has_ip();
+        s_scan_inputs.wifi_connected = s_scan_inputs.has_ip;
+        break;
+    case APP_STAGE_BLE_RF:
+        err = app_scan_native_ble_rf(ev, cfg, stats);
+        break;
+    case APP_STAGE_MDNS:
+        err = app_scan_native_mdns(ev, cfg, stats);
+        break;
+    case APP_STAGE_SSDP:
+        err = app_scan_native_ssdp(ev, cfg, stats);
+        break;
+    case APP_STAGE_LAN_HOSTS:
+        err = app_scan_native_lan_hosts(ev, cfg, stats);
+        break;
+    case APP_STAGE_LAN_SERVICES:
+        err = app_scan_native_lan_services(ev, cfg, stats);
+        break;
+    case APP_STAGE_ENRICHMENT:
+        /* No Device DB yet, so no profile-driven enrichment is possible. Safe
+         * read-only enrichment without a profile would be guessing. */
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
+        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    case APP_STAGE_MATERIALIZE: {
+        bool truncated = false;
+        (void)app_device_materialize(ev, &truncated);
+        if (truncated) {
+            app_ops_scan_mark_truncated(&s_ops);
+        }
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_DONE);
+        return APP_DIAG_OK;
+    }
+    default:
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
+        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    }
+
+    if (err == ESP_OK) {
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_DONE);
+        return APP_DIAG_OK;
+    }
+
+    /* A cancelled stage is a normal bounded outcome, not a failure. */
+    if (app_ops_scan_is_canceled(&s_ops)) {
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_CANCELED);
+        return APP_DIAG_ERR_CANCELED;
+    }
+
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
+        return APP_DIAG_ERR_NOT_IMPLEMENTED;
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* Dependency vanished mid-scan (for example the IP was lost). */
+        (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_SKIPPED);
+        return APP_DIAG_ERR_UNSUPPORTED;
+    }
+
+    ESP_LOGW(TAG, "scan stage %s failed: %s", app_scan_stage_name(stage),
+             esp_err_to_name(err));
+    (void)app_ops_stage_end(&s_ops, stage, APP_STAGE_STATE_FAILED);
+    return APP_DIAG_ERR_INTERNAL;
 }
 
 static app_diag_response_t execute_scan(const app_diag_request_t *request)
@@ -384,6 +488,7 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
     uint32_t budget_ms;
     uint32_t start_ms;
     int last_stage = -1;
+    app_scan_native_config_t native_cfg;
 
     if (app_ops_scan_begin(&s_ops, request->request_id, &report) != APP_OPS_OK) {
         response.error = APP_DIAG_ERR_BUSY;
@@ -392,8 +497,27 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
     }
     publish_state();
 
+    /* New generation: clear evidence, advance the application generation and
+     * mark every ephemeral binding as not-yet-seen. */
+    app_scan_evidence_reset(&s_evidence, report.generation);
+    app_device_generation_begin(report.generation);
+
+    app_scan_native_config_default(&native_cfg);
+    memset(&s_scan_stats, 0, sizeof(s_scan_stats));
+    app_scan_native_request_cancel(false);
+
+    wifi_mgr_status_t wifi_status;
+    wifi_mgr_get_status(&wifi_status);
+    memset(&s_scan_inputs, 0, sizeof(s_scan_inputs));
+    s_scan_inputs.wifi_configured = wifi_status.credentials_present;
+    s_scan_inputs.has_ip = wifi_mgr_has_ip();
+    s_scan_inputs.wifi_connected = s_scan_inputs.has_ip;
+    s_scan_inputs.wifi_driver_acquired = true; /* the handover decides below */
+    s_scan_inputs.ble_available = true;
+    s_scan_inputs.canceled = false;
+
     budget_ms = request->timeout_ms != 0u ? request->timeout_ms
-                                          : APP_RUNTIME_DEFAULT_TIMEOUT_MS;
+                                          : APP_RUNTIME_DEFAULT_SCAN_BUDGET_MS;
     start_ms = now_ms();
 
     for (int i = 0; i < (int)APP_STAGE_COUNT; ++i) {
@@ -409,9 +533,15 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
             break;
         }
 
-        stage_error = run_scan_stage((app_scan_stage_t)i);
+        s_scan_inputs.canceled = app_ops_scan_is_canceled(&s_ops);
+        stage_error = run_scan_stage((app_scan_stage_t)i, &s_evidence,
+                                     &native_cfg, &s_scan_stats);
         last_stage = i;
-        if (stage_error != APP_DIAG_OK && first_error == APP_DIAG_OK) {
+
+        /* The first non-OK stage outcome is reported. A skipped stage still
+         * contributes NOT_IMPLEMENTED so the caller can tell that this scan did
+         * not cover everything; the per-stage state carries the detail. */
+        if (first_error == APP_DIAG_OK && stage_error != APP_DIAG_OK) {
             first_error = stage_error;
         }
         publish_state();
@@ -423,6 +553,9 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
         return response;
     }
     publish_state();
+
+    /* Sweep ephemeral bindings that this generation did not observe. */
+    app_device_generation_finish();
 
     response.error = first_error;
     response.stage = last_stage >= 0 ? diag_stage_of((app_scan_stage_t)last_stage)
@@ -436,8 +569,13 @@ static app_diag_response_t execute_scan(const app_diag_request_t *request)
         response.stage_state = APP_DIAG_STAGE_STATE_SKIPPED;
     }
 
+    /* Evidence capacity overflow is a real truncation of the reported result. */
+    if (app_scan_evidence_truncated(&s_evidence)) {
+        response.truncated = true;
+    }
+
     response.partial = report.partial || (first_error != APP_DIAG_OK);
-    response.truncated = report.truncated;
+    response.truncated = response.truncated || report.truncated;
     return response;
 }
 
@@ -488,8 +626,9 @@ static app_diag_response_t execute_request(const app_diag_request_t *request)
 
     case APP_DIAG_CMD_DEVICES:
     case APP_DIAG_CMD_ENTITIES:
-        /* Enumeration is wired to ha_core in the device/state task (B3). */
-        return make_response(request, APP_DIAG_ERR_NOT_IMPLEMENTED);
+        /* Enumeration is served from the application binding tables, which are
+         * the same state the future GUI will read. */
+        return make_response(request, APP_DIAG_OK);
 
     case APP_DIAG_CMD_CONTROL:
         /* Control never silently succeeds: an unimplemented backend reports
@@ -543,6 +682,12 @@ esp_err_t app_runtime_start(void)
 
     app_ops_init(&s_ops);
     app_ops_init(&s_ops_mirror);
+    app_scan_evidence_reset(&s_evidence, 0u);
+    app_device_table_reset();
+
+    /* Prepare STA ownership and load stored credentials. An unprovisioned
+     * device is a normal state; it must not stop the runtime from starting. */
+    (void)wifi_mgr_init();
 
     if (xTaskCreate(app_worker_task, "app_worker", APP_RUNTIME_WORKER_STACK, NULL,
                     APP_RUNTIME_WORKER_PRIO, &s_worker) != pdPASS) {

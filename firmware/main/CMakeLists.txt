@@ -3,6 +3,10 @@ idf_component_register(
         "main.c"
         "app_ops.c"
         "app_diag_protocol.c"
+        "app_scan.c"
+        "app_device.c"
+        "app_wifi.c"
+        "app_scan_native.c"
         "app_runtime.c"
         "app_diag_console.c"
     INCLUDE_DIRS "." "include"
@@ -14,6 +18,11 @@ idf_component_register(
         esp_timer
         esp_driver_uart
         esp_app_format
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        lwip
         ha_core
         ha_discovery_l2
         esphome_l2

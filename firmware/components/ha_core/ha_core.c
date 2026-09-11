@@ -294,6 +294,37 @@ const ha_device_t *ha_core_device_at(size_t index)
     return NULL;
 }
 
+ha_core_status_t ha_core_device_remove(const char *device_id)
+{
+    device_slot_t *slot = device_find_slot(device_id);
+    if (slot == NULL) {
+        return HA_CORE_NOT_FOUND;
+    }
+
+    /*
+     * Remove the dependent Entities and States first so no Entity or State can
+     * outlive the Device it belongs to. A dangling Entity would let the UI or a
+     * control request address a device that no longer exists.
+     */
+    for (size_t i = 0; i < HA_CORE_MAX_ENTITIES; ++i) {
+        if (!s_entities[i].in_use) continue;
+        if (strcmp(s_entities[i].value.device_id, device_id) != 0) continue;
+
+        const char *entity_id = s_entities[i].value.entity_id;
+        for (size_t s = 0; s < HA_CORE_MAX_STATES; ++s) {
+            if (s_states[s].in_use &&
+                strcmp(s_states[s].value.entity_id, entity_id) == 0) {
+                memset(&s_states[s], 0, sizeof(s_states[s]));
+            }
+        }
+        memset(&s_entities[i], 0, sizeof(s_entities[i]));
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    revision_bump();
+    return HA_CORE_OK;
+}
+
 ha_core_status_t ha_core_entity_upsert(const ha_entity_t *entity)
 {
     if (!entity_valid(entity)) {
