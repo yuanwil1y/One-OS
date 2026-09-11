@@ -138,14 +138,14 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 
 ### B6 未完成项
 
-1. **HTTP 路由与处理器**（`/api/status`、`/api/wifi/scan`、`/api/wifi/connect`、`/api/db/upload`、
-   可选 `/api/portal/finish`）。线层（`app_portal`）与会话逻辑（`app_provision`）已就绪，
-   处理器应当是薄传输层。
-2. **AP 密码的本地出口**：按产品规则只在设备自身呈现与本地串口输出，不得进入日志或
-   `/api/status`。生成逻辑已实现并测试，出口未接。
-3. **NVS 凭据持久化**：`app_wifi` 已实现 `wifi_mgr_set_credentials`/`clear`/启动加载，
-   但"连接失败后保留凭据以便重试"与"版本标记"未验证。
-4. **`/api/status` 尚未接 `app_runtime_db_state()`**（库状态与版本已可取）。
+1. **本地密码出口**：按产品规则，AP 密码只在设备自身呈现与本地串口输出，
+   不得进入日志或 `/api/status`。生成逻辑已实现并测试，但**串口入口尚未接**——
+   目前启动配网会话的唯一途径还没有。
+2. **NVS 凭据持久化的重启行为未实测**：`wifi_mgr_set_credentials`/`clear`/启动加载
+   已实现，但"重启后自动重连"与"连接失败仍保留凭据"只有代码，没有实板证据。
+3. **`/api/status` 的 AP 地址**取自 `wifi_mgr_ap_ipv4()`，只在 AP 运行时非空。
+4. **HTTP 传输层没有任何自动化测试**：它是 ESP-IDF 专属代码，只有目标构建证明它能编译。
+   浏览器交互、上传中断、`/api/portal/finish` 的"先应答后停止"顺序都未验证。
 5. **实板全部未做**：无板、无浏览器、无真实 HTTP 服务器。
 
 **关于 `wifi_mgr_ap_*` 的证据等级**：它是本轮唯一完全没有自动化测试覆盖的产物。
