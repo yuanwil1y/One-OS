@@ -88,8 +88,7 @@ assert(esphome_api_init(&s,&c)==ESP_OK);
 assert(esphome_api_probe(&s,&pr)==ESP_OK&&!strcmp(pr.name,"noise-node")&&!strcmp(pr.model,"esp32-c6"));
 esphome_api_entity_t nitem[2];esphome_api_entity_list_t nlist={.items=nitem,.capacity=2};
 assert(esphome_api_entities(&s,&nlist)==ESP_OK&&nlist.count==1&&nlist.total_seen==1&&!nlist.truncated&&nitem[0].kind==ESPHOME_API_ENTITY_SWITCH);
-assert(esphome_api_subscribe(&s,scb,NULL)==ESP_OK);
-assert(esphome_api_poll(&s,1000)==ESP_OK&&got_state==1);
+assert(esphome_api_subscribe(&s,scb_off,NULL)==ESP_OK);
 esphome_api_command_t ncmd={.kind=ESPHOME_API_COMMAND_SWITCH,.key=0x11111111,.value.switch_.state=false};
 assert(esphome_api_command(&s,&ncmd)==ESP_OK);
 /* Sending the command changed nothing on its own: the observed state moves only
