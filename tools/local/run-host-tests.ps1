@@ -114,11 +114,31 @@ function Invoke-Group {
         'esphome_l2' {
             $inc = @(
                 "-I$(Join-Path $Root 'tests\esphome_l2\stubs')",
+                "-I$(Join-Path $Root 'tests\esphome_l2')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2')")
             $flags = @('-std=gnu11', '-Wall', '-Wextra', '-Werror', '-O2')
             $es = Join-Path $Root 'firmware\components\esphome_l2'
 
+            # These two are platform-neutral and therefore runnable here.
+            $nc = Join-Path $work 'test_noise_crypto.exe'
+            Invoke-Step 'compile test_noise_crypto' $CC (@($flags) + @($inc) + @(
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $Root 'tests\esphome_l2\test_noise_crypto.c'), '-o', $nc))
+            Invoke-Step 'run test_noise_crypto' $nc @()
+
+            $n = Join-Path $work 'test_noise.exe'
+            Invoke-Step 'compile test_noise' $CC (@($flags) + @($inc) + @(
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $es 'esphome_noise.c'),
+                    (Join-Path $Root 'tests\esphome_l2\noise_test_responder.c'),
+                    (Join-Path $Root 'tests\esphome_l2\test_noise.c'), '-o', $n))
+            Invoke-Step 'run test_noise' $n @()
+
+            # test_gatt, test_codec and test_api_client need <sys/socket.h>,
+            # <arpa/inet.h> and a POSIX host, so this Windows mirror cannot
+            # compile them; tests/esphome_l2/run_host_tests.sh is authoritative
+            # and CI runs it on Linux. They fail loudly here, never silently.
             $g = Join-Path $work 'test_gatt.exe'
             Invoke-Step 'compile test_gatt' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_ble_gatt.c'),
@@ -135,6 +155,9 @@ function Invoke-Group {
             Invoke-Step 'compile test_api_client' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_api.c'),
                     (Join-Path $es 'esphome_api_codec.c'),
+                    (Join-Path $es 'esphome_noise.c'),
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $Root 'tests\esphome_l2\noise_test_responder.c'),
                     (Join-Path $Root 'tests\esphome_l2\test_api_client.c'),
                     '-pthread', '-o', $a))
             Invoke-Step 'run test_api_client' $a @()
