@@ -22,6 +22,10 @@ The current main branch contains the board/LVGL foundation and eight non-Matter 
 8. Implement project-specific APIs according to the implementation model of their own upstream project, not by routing one project through another.
 9. Keep the firmware buildable after every migration step.
 
+## Current development order
+
+Build and validate the headless runtime first; add GUI last. The actionable task list, dependencies and acceptance criteria are in [Pre-GUI development tasks (Chinese)](docs/pre-ui-development.md). Serial diagnostics must exercise the same application commands and state snapshots that the later GUI will use.
+
 ## Nearby Devices application workflow
 
 The product-level integration target is one generic **Nearby Devices Browser / Controller** built around Home Assistant-style **Device → Entity → State/control** semantics.

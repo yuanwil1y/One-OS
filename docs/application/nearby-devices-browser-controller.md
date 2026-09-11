@@ -1,6 +1,8 @@
 # Nearby Devices Browser / Controller — End-to-End Application Development Guide
 
-Status: **canonical application-layer workflow specification**  
+Status: **canonical application-layer workflow specification**
+
+Implementation order: build and validate the headless runtime first, then add GUI. See [the current task list](../pre-ui-development.md). UI sections below define the final product, not an instruction to build screens before the runtime.  
 Target: **Waveshare ESP32-C6-Touch-LCD-1.9 / ESP32-C6 / ESP-IDF / FreeRTOS / LVGL**  
 Application: **Nearby Devices Browser / Controller**
 
@@ -372,7 +374,7 @@ Recommended full-corpus deployment is a compact read-only indexed binary file on
 
 Runtime lookup must be bounded and read records on demand rather than loading the full database into RAM.
 
-A small compiled fixture/core database may be used for tests or fallback, but there must still be only one logical Device DB API.
+Small compiled fixtures may be used only in test builds. Production firmware must not embed a recognition corpus as fallback: when SD/DB is unavailable, keep generic unknown Devices and skip recognition. The SD database is the sole production corpus, as required by nearby-devices-product-rules.md.
 
 ---
 

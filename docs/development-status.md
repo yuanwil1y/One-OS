@@ -53,19 +53,15 @@
 | tmp-do-not-use 及 -2/-3/-4 | 四者同 SHA；剩余分支任务说明，无独有固件实现 |
 | tmp/openthread-main-sync | 剩余任务说明与旧 sdkconfig；main 已补入 DTLS/EC-JPAKE 配置 |
 
-PR #5 的 ZHA/zigpy 内容已通过 PR #12 纳入，旧 draft 可关闭，不能再次整体合并研究分支。
+PR #5 的 ZHA/zigpy 内容已通过 PR #12 纳入，旧 draft 已于 2026-09-11 关闭，不能再次整体合并研究分支。
 保留 beta.1/beta.2 标签和 Releases。
 
 本次未删除远端分支：Git HTTPS 写入缺少凭据，可用 GitHub 连接没有删除 ref 操作。
 维护者可运行 `python3 tools/cleanup_remote_branches.py` 预览；确认后加 `--apply`。
 脚本先镜像备份所有 refs、检查 main 未变化及候选 SHA 未变化，再用逐分支 lease 和 atomic push 删除候选；若远端不支持则停止，不降级为无保护删除。
 
-## 下一步开发顺序
+## 当前开发顺序（用户已更新）
 
-1. 从 main 做一个小闭环：板级启动 + 单一无线扫描来源 + HA Device 列表。无 SD/DB 时仍显示未知设备，先验证真实观测与 UI 响应。
-2. 按 application 规范加入 Wi-Fi 凭据持久化、临时 SoftAP/Web 配网与错误状态。
-3. 实现 SD DB 格式校验、有限内存读取/匹配和可靠导入，再增加 Entity 信息。
-4. 一次接入一个可实测控制后端，只有收到真实确认/报告后才更新状态；先补齐所需认证/无线后端。
-5. Matter 单独修好依赖和构建，再评估实板 Flash/RAM 与多协议资源调度，之后才进入主线。
+先完成无 GUI 的底层和应用闭环，最后接 GUI。详细任务、依赖、验收与新增边界缺口见 [GUI 之前的开发任务书](pre-ui-development.md)。之前“先接屏幕设备列表”的建议已被此顺序替代。
 
-继续遵守三份 application 文档：生产识别库只放 SD、未知设备不丢弃、统一 HA 风格 Device/Entity UI。每个小步记录实际测试设备、固件 SHA、结果及限制。
+继续遵守三份 application 文档的最终产品行为：生产识别库只放 SD、未知设备不丢弃、最终使用统一 HA 风格 Device/Entity UI。每一步记录提交 SHA、host/CI 证据及单列的实板验收结果。

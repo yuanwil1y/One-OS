@@ -1,11 +1,11 @@
 # ZHA / zigpy 可移植 Level-2 API 第一阶段调研
 
-状态：**Phase 1 / research only**  
+状态：**历史 Phase 1 调研快照（2026-09-07），非当前执行任务**  
 分支：`research/zha-zigpy-l2-api`  
 调研日期：2026-09-07  
 目标：Waveshare ESP32-C6-Touch-LCD-1.9 / ESP-IDF + FreeRTOS  
 
-> 本文只记录调研、边界、候选 API 和验证计划。没有生产代码实现。所有 C API 名称和类型均为候选草案，Phase 2 必须在明确批准后才能落地。
+> 本文保留调研当时的候选 API、基线描述与来源。之后 PR #12 已将 zha_l2/zigpy_l2 代码和 zb_storage 预留分区纳入 main；原生 Zigbee backend 仍待实现。下文“没有实现/没有分区”、分支 AGENTS.md、候选 matcher 与 flash 数据库等描述均属于历史上下文，不能作为当前实现状态或执行要求。当前任务见 [GUI 前开发任务书](../pre-ui-development.md)，匹配器与生产存储遵循 application 规范：应用 Device DB 唯一匹配，生产语料只放 SD。
 
 ## 1. 结论摘要
 

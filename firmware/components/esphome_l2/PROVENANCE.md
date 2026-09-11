@@ -17,7 +17,7 @@ No previous NearBy runtime code was reused. This component does not restore `nea
 
 The current Native API transport implements the bounded plaintext protocol slice only. It detects peers that require encrypted Noise framing and returns an explicit unsupported/encryption-required error. A caller-supplied 32-byte Noise PSK is validated only for shape; it is never copied, logged, guessed or transmitted by this implementation.
 
-Because `AGENTS.md` requires authenticated ESPHome control, `esphome_api_command()` does not transmit commands on the plaintext transport. It validates supported command shapes and returns `ESP_ERR_NOT_SUPPORTED` with `ESPHOME_API_PROTOCOL_ERROR_AUTH_REQUIRED`. Command protobuf encoding is fixture-tested so an authenticated transport can use it later, but enabling device control requires a separately validated Noise client implementation.
+Authenticated ESPHome control remains required by this component's scope; `esphome_api_command()` does not transmit commands on the plaintext transport. It validates supported command shapes and returns `ESP_ERR_NOT_SUPPORTED` with `ESPHOME_API_PROTOCOL_ERROR_AUTH_REQUIRED`. Command protobuf encoding is fixture-tested so an authenticated transport can use it later, but enabling device control requires a separately validated Noise client implementation.
 
 ## Bounded footprint measurements
 

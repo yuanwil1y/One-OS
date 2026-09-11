@@ -46,7 +46,7 @@ def main():
         raise RuntimeError('main changed during backup; re-run after review.')
     # Allow only audit docs/tools changes above the reviewed baseline.
     changed = git('-C', str(backup), 'diff', '--name-only', BASE, main_sha).splitlines()
-    allowed = {'README.md', 'docs/development-status.md', 'tools/branch-cleanup-candidates.tsv', 'tools/cleanup_remote_branches.py'}
+    allowed = {'README.md', 'docs/development-status.md', 'tools/branch-cleanup-candidates.tsv', 'tools/cleanup_remote_branches.py', 'docs/pre-ui-development.md', 'docs/application/nearby-devices-browser-controller.md', 'docs/research/zha-zigpy-l2-api.md', 'firmware/components/esphome_l2/PROVENANCE.md'}
     if set(changed) - allowed:
         raise RuntimeError('main changed beyond audit files; re-review required.')
     for branch, expected in pending.items():
