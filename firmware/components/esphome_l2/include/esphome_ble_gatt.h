@@ -1,4 +1,26 @@
 #pragma once
+/* BLE GATT central: connect, discover, read, write, subscribe, cancel, disconnect.
+ *
+ * THREADING AND LIFETIME CONTRACT (the caller must honour all of it):
+ *
+ *  - One operation at a time per session. A second call while one is in flight
+ *    returns ESP_ERR_INVALID_STATE; this is not a queue.
+ *  - Notification callbacks run on the backend's own task (the NimBLE host task
+ *    in the ESP-IDF backend), NOT on the task that called subscribe(). They may
+ *    therefore run concurrently with a call from another task.
+ *  - A callback must not call back into this component. A GATT operation issued
+ *    from a notification callback waits for a completion that only the task it
+ *    is running on could produce, and deadlocks.
+ *  - The `user` pointer passed to subscribe() must stay valid until either
+ *    unsubscribe() or a disconnect()/deinit() that returns ESP_OK. A disconnect
+ *    that fails or times out may leave a callback in flight, so the caller must
+ *    not free that context on a failed teardown.
+ *  - cancel() is the only call that is safe while an operation is outstanding.
+ *    It abandons the operation: the operation reports ESP_ERR_INVALID_STATE
+ *    rather than the backend's own result, because a cancel that terminates the
+ *    link can make a pending operation complete with a meaningless success.
+ *  - A timeout tears the link down. It is not retried here.
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
