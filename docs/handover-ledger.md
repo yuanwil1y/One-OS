@@ -88,10 +88,10 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B4 DB 格式/工具 | 完成 | 通过 | 通过 | 不适用 | — |
 | **B5 SD 读取/识别/配方** | **完成** | **通过** | **通过** | **未做** | 已合并进 main；见 §4 |
 | **B6 配网与导入后端** | **完成（软件）** | **通过** | **通过** | **未做** | NVS 重启行为与浏览器交互未实测；见 §4b |
-| B7 BLE GATT / ESPHome | 部分（已有组件） | 通过 | 通过 | 未做 | Noise 认证未实现；GATT 交接未接应用 |
+| B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt 组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建；**固件适配器、control 后端、GATT 组件自身的 cancel 竞态仍未做**；见 §4d |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator；无应用通路 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
-| **B10 统一控制闭环** | **完成（软件）** | **通过** | **通过** | **未做** | 无后端已注册，因此目前一切都正确地被拒绝；见 §4c |
+| **B10 统一控制闭环** | **仅模块（未接线）** | **通过** | **通过** | **未做** | **更正**：`app_control.h` 在固件里没有任何调用者，`APP_DIAG_CMD_CONTROL` 仍直接返回 `NOT_IMPLEMENTED`，所以不是"一切都正确地被拒绝"，而是**根本没有提交**；见 §4c |
 | **B11 无 GUI 整机验收** | **软件侧完成** | **通过** | **通过** | **未做** | 实板清单全部待办，见 `docs/hardware-acceptance.md` |
 
 ### B5 具体交付（本轮）
@@ -183,7 +183,15 @@ AMBIGUOUS_BACKEND，歧义绝不是猜测的许可）。
 控制循环因此不需要回头读数据库重新推导一次已经做过的决定。
 
 **当前没有任何后端注册**，且 `app_backend_is_drivable()` 仍把所有控制后端报为不可驱动，
-所以现有语料里没有任何可写实体——控制循环会正确地拒绝一切。这是预期状态，不是缺陷。
+所以现有语料里没有任何可写实体——控制循环会正确地拒绝一切。
+
+**但必须更正一句此前的表述。** 本节曾写"控制循环会正确地拒绝一切"，隐含的是"有请求被拒绝"。
+实际不是：`app_control.h` 在整个 `firmware/` 下只被 `app_control.c` 自己 include，
+`app_control_submit()`/`app_control_tick()`/`app_control_reconcile()` 没有任何调用者，
+`firmware/main/app_runtime.c` 的 `APP_DIAG_CMD_CONTROL` 分支仍直接返回 `APP_DIAG_ERR_NOT_IMPLEMENTED`
+（注释写的是"未实现的后端报 NOT_IMPLEMENTED"，但代码在到达任何后端之前就返回了）。
+因此现状是**根本没有请求进入控制循环**，而不是请求被拒绝。B10 的模块与 host 测试是真的，
+接线是缺的；接线列为 B10 未完项，不再是"完成（软件）"。
 
 ### B11 软件验收
 
@@ -193,6 +201,93 @@ AMBIGUOUS_BACKEND，歧义绝不是猜测的许可）。
 truncated；取消扫描不清空设备列表；一次漏报不删除设备；扫描代次不干扰在线设备的控制。
 
 实板部分见 `docs/hardware-acceptance.md`，**每一项都待办**。
+
+
+## 4d. B7 进度（ESPHome 认证传输已通；BLE 会话已建；适配器未接）
+
+### 已完成并有证据的部分
+
+**Noise 认证传输（`esphome_l2`）。** 此前该组件只实现明文分片，遇到需要加密的 peer 就返回
+`NOISE_NOT_SUPPORTED`，`esphome_api_command()` 永远无法发送。现在：
+
+- `esphome_noise_crypto.c`：从规范实现 SHA-256、HMAC-SHA256、HKDF、ChaCha20-Poly1305、X25519。
+  可移植 C11，无堆、无全局、无递归、无第三方密码库；同一份代码同时编进固件与 host 测试。
+  GF(2^255-19) 用 10 个 32 位 limb、radix 2^25.5（ref10 布局），**不使用 `unsigned __int128`**，
+  因此在 32 位 RISC-V 上没有 128 位算术依赖。
+- `esphome_noise.c`：Noise 框架 rev 34（§5、§6、§7.5、§9、§12）的 NNpsk0 状态机。
+  握手态 240 B，每个传输 cipherstate 48 B，全部在调用者的 session 内。
+- `esphome_api.c`：加密分片。prologue 为 `"NoiseAPIInit"`（12 字节，无终止符，与
+  `aioesphomeapi` 的 `b"NoiseAPIInit\0\0"` 一致——Noise 的 prologue 长度由调用者给出，
+  12 与 14 只差两个 NUL，客户端发的就是 12 字节）；client hello 为
+  `00 01 00 00`；之后每帧 `01 <len:2B BE> <AEAD(type:2B BE | data_len:2B BE | payload)>`。
+  认证失败的帧丢弃、绝不分发，连续 4 次失败断开连接。
+- `esphome_api_command()` 现在会在已建立的加密会话上发送；没有 PSK 时仍以
+  `AUTH_REQUIRED` 明确拒绝，而不是明文发送。**发送成功仍不改状态**，状态只由 peer 的报告移动。
+- `PROVENANCE.md` 已更新：删掉了"Noise 未实现、控制保持 fail-closed"的旧结论。
+
+证据分三层，都不是自证：
+
+1. `tests/esphome_l2/test_noise_crypto.c`（80 例）：SHA-256 用 FIPS 180-4 / RFC 6234 全向量，
+   HMAC 用 RFC 4231 case 1/2/3/4/6/7，HKDF 用 RFC 5869 case 1，AEAD 用 RFC 8439 §2.8.2
+   （另含 1232 个单比特翻转的拒绝用例），X25519 用 RFC 7748 §5.2/§6.1 **含 1000 次迭代**。
+   另在 32 位 i686 构建下结果与 64 位逐字节一致。
+2. `tests/esphome_l2/test_noise.c`：钉住固定 PSK / prologue / 临时密钥下的握手报文与传输帧字节。
+   这些 fixture 由 `tools/reference/noise_nnpsk0_reference.py` 生成——那是**另一份用 Python
+   `hashlib` + `cryptography` 独立实现**的同一握手；另有一个按规范直写的 responder 驱动完整交换。
+3. `tests/esphome_l2/test_api_client.c`：在 loopback 上跑完整加密会话（握手 → probe → entities →
+   subscribe → command → 状态上报 → disconnect），并覆盖错误 PSK 与伪造帧两种拒绝路径。
+   该用例需要 POSIX socket，**由 CI 编译运行**；本机镜像把它报成响亮失败而不是跳过。
+
+**BLE GATT 会话（`firmware/main/app_ble_gatt.{c,h}`，新 host 组 177 checks）。**
+GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三个后果被抬到会话层处理：
+
+1. **取消不能看起来像成功。** 取消若终止链路，未完成的 read 会以 `ESP_OK` + 零长度返回。
+   会话为每个操作打上签发时的 generation，取消/关闭/超时之后返回的操作一律报
+   `CANCELLED`/`TIMEOUT` 并丢弃载荷，绝不报成功。
+2. **迟到的回调不能落进下一个会话。** 订阅记录自己的 generation，不匹配的通知在进入应用
+   回调之前就被丢弃并计数。
+3. **操作超时是会话失败，不是重试。** 链路被拆掉、会话转 FAILED，重连是调用者的显式决定。
+
+另含：`open()` 内部完成发现（数据库在会话内定界：8 服务 / 24 特征 / 12 描述符）、
+按特征索引解析 value handle 与 CCCD（走该特征自己的描述符区间，不假设固定间隔）、
+`turn_on`/`turn_off`/`set_value`/`set_text` 加 scale 的编解码，以及无法编码时报 `UNSUPPORTED`
+而不是猜一种编码。
+
+### B7 未完成项（明确列出）
+
+- **固件适配器**：把 `app_ble_gatt_session_*` 绑到 `esphome_ble_gatt_*` 的 ops 实现（含地址字节序
+  转换：`esphome_ble_gatt_nimble.c` 会反转 6 字节，而扫描证据是 NimBLE 原始顺序，两侧约定不一致，
+  必须先定一个并写成有回归表的函数）。
+- **control 后端**：`claims`/`send` 实现并注册进 `app_control`；通知 → `app_control_report()`/
+  `app_control_confirm()`。注意 `app_control_backend_ops_t::send` 不传 request_id，而确认只认
+  request_id，需要扩展 vtable 或让适配器用 `app_control_pending_at()` 反查。
+- **GATT 组件自身两个缺陷**（已复核代码，未修）：
+  (a) cancel 与在途操作竞态时**返回假成功**——`wait_kind` 是单一共享字段，cancel 把它改成
+  `WAIT_DISCONNECT`，DISCONNECT 事件把 `op_status` 置 0，在途 read 的 `waitdone` 取到信号量后
+  返回 `ESP_OK`，于是 `esphome_ble_gatt_read()` 以 `*len == 0` 报告成功；`discover` 在这种竞态下
+  甚至可能返回 `ESP_OK` 加一个空数据库。
+  (b) 操作在途时调用 `deinit()` 会删除信号量并清零会话，阻塞中的调用者随后解引用
+  `i->backend == NULL`，是 use-after-free。
+- **实体可写性**：`app_backend_is_drivable()` 是编译期开关且对所有控制后端返回 false，
+  `BLE_GATT` 的写目标因此在识别阶段就被丢掉（`app_device_db.c` 只在 drivable 时保留
+  `write_target_id`），`entity_upsert_recipe()` 还会丢掉 `read_source_id`，
+  容器里的 `codec_id`/`subscription_id` 生产读取路径根本没读。要支持 BLE 控制必须先补这条链。
+- **应用通路**：`firmware/main/` 里没有任何地方 include `esphome_ble_gatt.h`，
+  `esphome_ble_gatt_nimble.c` 也不被任何 host 测试编译（`test_gatt.c` 用一个全零 ops 顶替生产符号）。
+- **实板互操作**：真实 ESPHome 节点 + API 加密密钥；一块可控 BLE 外设。见 §9 与
+  `docs/hardware-acceptance.md`。
+
+### 本轮的编译期教训（第 4、5 次）
+
+前三次已在 §"编译期问题的教训"记录。本轮又两次：
+
+4. `tests/esphome_l2/test_noise_crypto.c` 里一个不再被使用的 `ad` 数组被 CI 的 **gcc**
+   以 `-Werror=unused-but-set-variable` 拒绝，而本机 clang 不报这个诊断。两台编译器都要过。
+5. 同一个提交里 `esphome_api.c` 有两处**只有目标构建能发现**的错误：`impl_t` 从未加上
+   `noise_client_hello()` 读取的 `noise_psk` 成员；`hardclose()` 在 `nwipe()` 定义之前调用它。
+   本机之所以没发现，是因为唯一编译 `esphome_api.c` 的 host 二进制需要 POSIX socket 头，
+   本机构建在 include 阶段就停下了——**这就是"18 组全绿但目标构建失败"的第 5 次重演**。
+   本地镜像现在把这次编译报成失败，而不是静默跳过。
 
 
 ## 5. 本轮修掉的四个边界问题
