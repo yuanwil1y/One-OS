@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app_control.h"
 #include "app_device.h"
 #include "app_db_import.h"
 #include "app_device_db.h"
@@ -1160,6 +1161,41 @@ static app_diag_response_t execute_status(const app_diag_request_t *request)
     return response;
 }
 
+/*
+ * The control loop's refusals, in the diagnostic vocabulary.
+ *
+ * Every one of these is a distinct reason a control was not sent, so they map
+ * one-to-one rather than collapsing into a generic failure: an operator reading
+ * the console has to be able to tell "this entity has no backend" from "another
+ * control for it is already pending".
+ */
+static app_diag_error_t control_diag_error(app_control_status_t status)
+{
+    switch (status) {
+    case APP_CONTROL_ERR_INVALID_ARGUMENT:
+        return APP_DIAG_ERR_INVALID_ARGUMENT;
+    case APP_CONTROL_ERR_UNKNOWN_ENTITY:
+        return APP_DIAG_ERR_NOT_FOUND;
+    case APP_CONTROL_ERR_NOT_WRITABLE:
+    case APP_CONTROL_ERR_UNSUPPORTED:
+    case APP_CONTROL_ERR_NO_BACKEND:
+    case APP_CONTROL_ERR_AMBIGUOUS_BACKEND:
+        return APP_DIAG_ERR_UNSUPPORTED;
+    case APP_CONTROL_ERR_OUT_OF_RANGE:
+        return APP_DIAG_ERR_INVALID_ARGUMENT;
+    case APP_CONTROL_ERR_DEVICE_UNAVAILABLE:
+        return APP_DIAG_ERR_NOT_FOUND;
+    case APP_CONTROL_ERR_BUSY:
+        return APP_DIAG_ERR_BUSY;
+    case APP_CONTROL_ERR_NO_CAPACITY:
+        return APP_DIAG_ERR_CAPACITY;
+    case APP_CONTROL_ERR_BACKEND_FAILED:
+        return APP_DIAG_ERR_INTERNAL;
+    default:
+        return APP_DIAG_ERR_INTERNAL;
+    }
+}
+
 static app_diag_response_t execute_request(const app_diag_request_t *request)
 {
     app_diag_response_t response;
@@ -1194,10 +1230,45 @@ static app_diag_response_t execute_request(const app_diag_request_t *request)
          * the same state the future GUI will read. */
         return make_response(request, APP_DIAG_OK);
 
-    case APP_DIAG_CMD_CONTROL:
-        /* Control never silently succeeds: an unimplemented backend reports
-         * NOT_IMPLEMENTED so no caller can mistake it for a state change. */
-        return make_response(request, APP_DIAG_ERR_NOT_IMPLEMENTED);
+    case APP_DIAG_CMD_CONTROL: {
+        /*
+         * Control goes through the unified loop, not around it. The loop is the
+         * only place that enforces the product rules - the Entity exists, its
+         * Device is online, it is writable, the action is advertised, the value
+         * is in range, exactly one backend claims it - and it is the only place
+         * that knows a successful send is not a state change.
+         *
+         * Reaching this code with no backend registered is the designed state,
+         * and the loop says so with NO_BACKEND. Reporting NOT_IMPLEMENTED here
+         * instead, as this case used to, meant no request ever reached the loop.
+         */
+        app_control_slot_t *slot = NULL;
+        app_control_status_t status;
+
+        if (request->target[0] == '\0' || request->action[0] == '\0') {
+            return make_response(request, APP_DIAG_ERR_INVALID_ARGUMENT);
+        }
+
+        status = app_control_submit(request->target, request->action,
+                                    request->value[0] != '\0' ? request->value : NULL,
+                                    request->request_id, now_ms(),
+                                    request->timeout_ms, &slot);
+        if (status != APP_CONTROL_OK) {
+            app_diag_response_t refused = make_response(request, control_diag_error(status));
+            refused.detail = app_control_status_name(status);
+            return refused;
+        }
+
+        /*
+         * Accepted, not confirmed. The response says the request is in flight
+         * and the state it will be confirmed against arrives later, through the
+         * backend, exactly as the loop requires.
+         */
+        response = make_response(request, APP_DIAG_OK);
+        response.detail = app_control_state_name(slot != NULL ? slot->state
+                                                             : APP_CONTROL_STATE_PENDING);
+        return response;
+    }
 
     case APP_DIAG_CMD_PORTAL: {
         app_diag_error_t err = execute_portal(request, &response, NULL, 0u);
