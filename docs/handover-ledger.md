@@ -551,6 +551,11 @@ cd D:\OS\One-OS
 
 ### CI
 
+- **`a838205`（本分支，含本轮全部改动）：`build` success，`host-tests` 21 组通过、1 组失败**
+  —— [run 34688060996](https://github.com/yuanwil1y/One-OS/actions/runs/34688060996)。
+  唯一失败组是本文件多处记录的 `esphome_l2` / `test_api_client` 加密路径（见 §4d）。
+  关键点：新增的 `app_ble_native` 在 CI 上 **PASS**，而 CI 用的是 **gcc**（比本机 clang 严格），
+  `test_noise` 也报 `noise tests: ok`（含新增的多帧传输向量）。
 - **main `74facd3`（PR #20 合并提交）：`build` 与 `host-tests` 均 success**
   —— [run 34635862479](https://github.com/yuanwil1y/One-OS/actions/runs/34635862479)。
   这是 B5 完成的构建证据。

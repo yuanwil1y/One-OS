@@ -103,14 +103,16 @@ writable device.
 ## 5b. BLE GATT central (B7)
 
 The session module (`firmware/main/app_ble_gatt.c`) is host-tested with a
-scripted backend; nothing below has been run against a radio, and the firmware
-adapter that binds it to `esphome_ble_gatt_*` does not exist yet. **These items
-are blocked on that adapter**, and are listed so the work is visible.
+scripted backend, and the firmware adapter that binds it to `esphome_ble_gatt_*`
+now exists (`firmware/main/app_ble_gatt_native.c`) with its own host group
+(`app_ble_native`, 96 checks, passing locally and on CI). **Nothing below has run
+against a radio**: the adapter has never been executed against a real peer, so
+item 5b.1 still gates everything else.
 
 | | Check | Expected | Evidence |
 |---|---|---|---|
 | 5b.1 | A second ESP32 running the ESP-IDF `bleprph` example, or a Linux host with BlueZ `btgatt-server` | needed before anything below can run | — |
-| 5b.2 | Scan, then `request 5 devices`; compare the printed address with the peripheral's own | the byte order is the one the scan evidence uses — this settles the address-order question in the ledger | serial log + peripheral log |
+| 5b.2 | Scan, then `request 5 devices`; compare the printed address with the peripheral's own | the byte order is the one the scan evidence uses — this settles the address-order question in the ledger. The adapter currently performs **no** reversal, so if this item fails the fix belongs in the adapter | serial log + peripheral log |
 | 5b.3 | Open a GATT session | connect and discovery run exactly once; the radio is held for the session and handed back on close | serial log |
 | 5b.4 | Compare the discovered service/characteristic/descriptor counts with nRF Connect's view | identical, and `truncated` set if the peer exceeds the session's bounds | screenshots + serial log |
 | 5b.5 | Read a known characteristic, then one whose value exceeds the buffer | byte-exact value; the oversized read is refused, not truncated silently | serial log |
