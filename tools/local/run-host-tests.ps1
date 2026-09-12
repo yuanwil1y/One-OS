@@ -465,6 +465,28 @@ function Invoke-Group {
                 "-I$(Join-Path $hc 'include')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
         }
+        'app_ctl_esphome' {
+            # The ESPHome control backend. On ESPHome the send-is-not-a-state-change
+            # rule is easier to get wrong than on BLE: a state report arrives on the
+            # same subscription for an entity the device already had a value for, so
+            # confirming on "a report arrived" would mark a refused command confirmed.
+            Build-And-Run 'app_ctl_esphome' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ctl_esphome.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_esphome.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
         'app_acceptance' {
             Build-And-Run 'app_acceptance' @(
                 (Join-Path $hc 'ha_core.c'),

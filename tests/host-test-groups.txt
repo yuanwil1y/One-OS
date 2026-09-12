@@ -27,6 +27,7 @@ app_provision tests/host/run_app_provision_tests.sh
 app_control tests/host/run_app_control_tests.sh
 app_ctl_ble tests/host/run_app_ctl_ble_tests.sh
 app_ctl_ble_gatt tests/host/run_app_ctl_ble_gatt_tests.sh
+app_ctl_esphome tests/host/run_app_ctl_esphome_tests.sh
 app_ble_gatt tests/host/run_app_ble_gatt_tests.sh
 app_ble_addr tests/host/run_app_ble_addr_tests.sh
 app_ble_native tests/host/run_app_ble_native_tests.sh

@@ -15,6 +15,7 @@ idf_component_register(
         "app_control.c"
         "app_ctl_ble.c"
         "app_ctl_ble_gatt.c"
+        "app_ctl_esphome.c"
         "app_ble_gatt.c"
         "app_ble_addr.c"
         "app_ble_gatt_native.c"
