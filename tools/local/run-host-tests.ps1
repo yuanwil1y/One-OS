@@ -255,6 +255,27 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\test_app_diag_protocol.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')")
         }
+        'app_cli_session' {
+            # The headless acceptance loop: the lines an operator types at the serial
+            # console while working through docs/hardware-acceptance.md, driven
+            # through the real parse -> decide -> render path. app_control and
+            # app_scan make the decisions, so this group needs their dependencies.
+            Build-And-Run 'app_cli_session' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_diag_protocol.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_cli_session.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
         'app_ops' {
             Build-And-Run 'app_ops' @(
                 (Join-Path $m 'app_ops.c'),
