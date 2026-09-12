@@ -501,6 +501,23 @@ python tools/reference/noise_transport_reference.py
    含自身内容的校验和）；`app_device_db_verify_unchanged()` 是显式的全量重校验（流式 body
    CRC + 重新询问介质长度），能抓原地改写与增长。两级代价不同，已分别写入文档。
 
+### 本轮另外修掉的一个（B6 侧，host 已验证）
+
+5. **已停止的 AP 仍在 `/api/status` 里报出旧地址**。`app_wifi.c::wifi_mgr_ap_ipv4()` 本身是
+   对的：AP 一旦停下就返回 `ESP_ERR_INVALID_STATE` 并清空输出。但 `/api/status` 的文档由
+   `app_portal_build_status_json()` 生成，而它**照抄调用者 struct 里的内容**——浏览器和
+   按验收清单操作的人读到的正是这份文档，`"active":false` 旁边挂着一个地址会让人去找一个
+   根本没在运行的门户。现在构建器只在 `active` 为真时才输出 `ap_ssid`/`ap_ipv4`，其余情况
+   一律空串：不变量由**构造保证**，不再依赖每个调用者记得清空（这也正是响应形状放在这个
+   文件里的原因）。
+
+新增测试 2 个（`app_portal` 组 95 → **104 checks**）：
+
+- `test_status_ap_address_follows_the_ap()`：AP 停止时地址与 SSID 在文档里为空；
+- `test_status_carries_no_generated_secret()`：用**真实生成的** AP 密码和真实解析出的
+  station 密码去查文档，断言两者都不出现。既有测试只查字段名 `password`，查不到值——
+  万一以后有人加字段时传错缓冲区，只有查值才能发现。
+
 ## 6. 测试命令与结果
 
 ### 本机（2026-09-12，本轮新增组）
@@ -508,12 +525,21 @@ python tools/reference/noise_transport_reference.py
 ```powershell
 cd D:\OS\One-OS
 .\tools\local\run-host-tests.ps1                      # 全部组
-.\tools\local\run-host-tests.ps1 -Group app_ble_native # 本轮新增的 BLE 适配器组
+.\tools\local\run-host-tests.ps1 -Group app_ble_native  # 本轮新增：BLE 固件适配器
+.\tools\local\run-host-tests.ps1 -Group app_cli_session # 本轮新增：无 GUI 验收会话
 ```
 
-新增组 `app_ble_native`：**96 checks，0 failures**（CI 用同一份
-`tests/host/run_app_ble_native_tests.sh`，额外带 ASan+UBSan）。它编译**真实的**
-`esphome_ble_gatt.c`，只把 NimBLE 后端替换成脚本化 radio。
+本轮新增两组：
+
+| 组 | checks | 内容 |
+|---|---|---|
+| `app_ble_native` | 96 | 编译**真实的** `esphome_ble_gatt.c`，只把 NimBLE 后端换成脚本化 radio，验证固件侧的 ops 表 |
+| `app_cli_session` | 100 | 把 `docs/hardware-acceptance.md` 里操作员真正会敲的命令行走一遍真实的 parse → decide → render 路径 |
+
+`app_cli_session` 用的是真实决策模块（`app_control` 判控制拒绝、`app_scan` 判阶段结论），
+不是第二份规则副本；它抓的是**漂移**：命令还能解析但渲染出没人能据以行动的响应、拒绝理由变了、
+或者某个阶段的结论不再被报告。它证明不了平台那一半——`app_runtime.c`、`app_scan_native.c`
+和射频路径是 ESP-IDF-only，由目标构建覆盖。
 
 ### 本机（2026-09-11，上一轮）
 
@@ -543,11 +569,13 @@ cd D:\OS\One-OS
 | `app_provision` | 120 | 0 |
 | `app_ble_gatt` | 177 | 0 |
 | `app_ble_native`（本轮新增） | 96 | 0 |
+| `app_cli_session`（本轮新增） | 100 | 0 |
+| `app_portal`（本轮 +9） | 104 | 0 |
 | `app_acceptance` | 581 | 0 |
 | `device_db_python` | 36 | 0 |
 | `device_db_format` | 200 | 0 |
 
-（21 组在本机通过；`esphome_l2` 与 `nmap_l2` 见上文。）
+（23 组在本机通过；`esphome_l2` 与 `nmap_l2` 见上文。）
 
 ### CI
 

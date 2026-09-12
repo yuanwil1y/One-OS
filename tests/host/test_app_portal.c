@@ -254,6 +254,82 @@ static void test_status_document_shape(void)
     }
 }
 
+/*
+ * The AP address is only in the document while the AP is up.
+ *
+ * wifi_mgr_ap_ipv4() answers ESP_ERR_INVALID_STATE once the AP is down and the
+ * caller then leaves the field empty, but the builder is what an operator reads:
+ * a status document that showed an AP address while `active` was false would have
+ * a browser - and a person following the hardware checklist - look for a captive
+ * portal that is not running. The pair of fields is pinned together here rather
+ * than trusted to the caller.
+ */
+static void test_status_ap_address_follows_the_ap(void)
+{
+    app_portal_status_t status;
+    char out[APP_PORTAL_STATUS_MAX];
+
+    /* Down: both fields empty even if the caller left stale text in the struct. */
+    memset(&status, 0, sizeof(status));
+    status.active = false;
+    (void)snprintf(status.ap_ssid, sizeof(status.ap_ssid), "NearBy-One-A1B2");
+    (void)snprintf(status.ap_ipv4, sizeof(status.ap_ipv4), "192.168.4.1");
+    status.sta_state = "disconnected";
+    status.db_state = "ready";
+    status.firmware = "One-OS 0.1.0";
+    status.upload_phase = "idle";
+
+    CHECK(app_portal_build_status_json(&status, out, sizeof(out)) > 0u,
+          "the status document was built");
+    CHECK(strstr(out, "\"active\":false") != NULL, "active is false: %s", out);
+    /* The builder copies what it is given, so the honest reading is: the caller is
+     * responsible for clearing these, and the test records which one it is. */
+    CHECK(strstr(out, "\"ap_ipv4\":\"\"") != NULL,
+          "an AP that is down has no address in the document, got: %s", out);
+}
+
+/*
+ * No secret can reach the status document, checked against a password that was
+ * actually generated rather than against the word "password".
+ *
+ * test_status_document_shape() checks for the field NAME; this checks for the
+ * VALUE, which is the property that matters if someone later adds a field and
+ * passes the wrong buffer to it.
+ */
+static void test_status_carries_no_generated_secret(void)
+{
+    app_portal_status_t status;
+    app_portal_wifi_form_t form;
+    char ap_password[APP_PORTAL_AP_PASSWORD_MAX];
+    char out[APP_PORTAL_STATUS_MAX];
+
+    CHECK(app_portal_generate_ap_password(fake_random, ap_password, sizeof(ap_password)),
+          "an AP password was generated");
+    CHECK(ap_password[0] != '\0', "and it is not empty");
+
+    memset(&status, 0, sizeof(status));
+    status.active = true;
+    (void)snprintf(status.ap_ssid, sizeof(status.ap_ssid), "NearBy-One-A1B2");
+    (void)snprintf(status.sta_ssid, sizeof(status.sta_ssid), "HomeWiFi");
+    status.sta_state = "connected";
+    status.db_state = "ready";
+    status.firmware = "One-OS 0.1.0";
+    status.upload_phase = "idle";
+
+    CHECK(app_portal_build_status_json(&status, out, sizeof(out)) > 0u, "status built");
+    CHECK(strstr(out, ap_password) == NULL,
+          "the generated AP password is not in the status document: %s", out);
+
+    /* And the station credential an operator typed into the form must not appear
+     * either - the portal receives it, the status document never echoes it. */
+    CHECK(app_portal_parse_wifi_form("ssid=HomeWiFi&password=s3cr3t-sta",
+                                     strlen("ssid=HomeWiFi&password=s3cr3t-sta"),
+                                     &form) == APP_PORTAL_FORM_OK,
+          "the form parsed");
+    CHECK(strstr(out, form.password) == NULL,
+          "the station password is not in the status document: %s", out);
+}
+
 static void test_status_refuses_unsafe_text_rather_than_escaping(void)
 {
     app_portal_status_t status;
@@ -474,6 +550,8 @@ int main(void)
     test_content_length_parsing();
 
     test_status_document_shape();
+    test_status_ap_address_follows_the_ap();
+    test_status_carries_no_generated_secret();
     test_status_refuses_unsafe_text_rather_than_escaping();
     test_scan_document_handles_hostile_ssids();
     test_scan_document_is_bounded();

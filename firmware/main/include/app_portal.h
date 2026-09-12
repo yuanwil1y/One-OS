@@ -131,6 +131,11 @@ typedef struct {
 /*
  * Build the /api/status document.
  *
+ * `ap_ssid` and `ap_ipv4` are emitted only when `active` is true; with the AP down
+ * they are reported as empty strings whatever the caller put in them, so a browser
+ * (and a person following the hardware checklist) is never sent looking for a
+ * captive portal that is not running.
+ *
  * Returns the written length, or 0 when the buffer is too small - in which case
  * nothing is written and the caller must not send a truncated document to a
  * browser that will try to parse it.
