@@ -331,27 +331,41 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 
 ### B7 仍未完成的关键一项
 
-**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败。** 本轮把失败点从
-"客户端等不到 server hello"推到了 **`esphome_noise_read_message()` 对 responder 的第 2 条消息
-AEAD 校验失败**（诊断输出 `C read_message=4`，`ck=`/`k=` 两侧不同），但**没有定位到根因**。
+**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败**，但本轮把它的定位从
+"某一侧算错了"缩小到了**第 1 条消息校验之后的分歧**，并且**第一次拥有了本机可复现的调试回路**。
 
-必须把已知与未知分清：
+本机调试回路（本轮建成，未提交，见下）：`D:\OS\.local-build\stubinc\` 里有一套自洽的
+socket 类型与实现（`sys/socket.h` 声明 + `win_loopback.c` 实现），配
+`D:\OS\.local-build\local_enc.c`（把测试的加密段独立出来、两端同进程）。构建命令：
 
-- **已知**：协议层本身是对的。`test_noise.c` 用独立 Python 实现生成的钉死向量、一个按规范直写的
-  responder 的完整交换、以及 `test_noise_crypto.c` 的全部 RFC 向量都通过；固件目标构建通过。
-- **已知**：握手第 1 条消息是被 responder 接受并成功解密的（peer 打印 `handshake ok`），
-  说明 PSK、prologue、协议名在两侧一致。
-- **未知**：为什么 responder 在解第 1 条消息前的 `ck` 与 initiator 在同一时刻的 `ck` 不同。
-  这是根因所在，也是下一步唯一要看的东西。
-- **已排除**：`noise_test_responder.c` 的 `ntr_reset` 两次调用、prologue 长度差异（12 对 14，
-  `test_noise.c` 用 12 与实现一致）、PSK 传递（两侧都打印 `psk0=a0a1`）。
+```
+clang -std=gnu11 -O2 -I<t>/stubinc -I firmware/components/esphome_l2/include \
+      -I firmware/components/esphome_l2 -I tests/esphome_l2 \
+      <t>/stubinc/win_loopback.c \
+      firmware/components/esphome_l2/{esphome_api,esphome_api_codec,esphome_noise,esphome_noise_crypto}.c \
+      tests/esphome_l2/noise_test_responder.c D:\OS\.local-build\local_enc.c -pthread -o le.exe
+```
+（`<t>` = `D:\OS\.local-build`；还需 `sys/time.h`、`unistd.h`、`fcntl.h` 三个 stub 头，
+已在同目录。）
 
-**教训（本轮付了约 20 次 CI 往返）**：这类对称协议的不一致必须在同一进程内并排调试，
-不要在 CI 上用打印语句二分。本机为此建了 `tests/esphome_l2/stubs/win/`（进程内 socket 回环）
-与 `tools/local/run-win-shim-test.ps1`，但**该 harness 尚未完成**：它能跑明文半边，
-加密半边会死锁，且自身还有两处编译问题（`select` 的 `fd_set`/`timeval` 类型、
-`struct addrinfo` 只做了前向声明）。`tests/esphome_l2/stubs/win/README.md` 写明了这些。
-镜像因此仍把 `test_api_client` 的编译报成失败，而不是静默调用一个不能用的 harness。
+**逐层打印后得到的确定结论**（两侧数值完全一致，因此这些都**已排除**）：
+
+| 步骤 | initiator | responder |
+|---|---|---|
+| `MixHash(prologue)` 后 | `ck=f0b8 h=4040` | `ck=f0b8 h=4040` |
+| `MixKeyAndHash(psk)` 后 | `ck=e233 k=b1a5 h=e85e` | `ck=e233 k=b1a5 h=e85e` |
+| `MixHash/MixKey(e.public_key)` 后 | `ck=b355 k=c1c0 h=95f5` | `ck=b355 k=c1c0 h=95f5` |
+| 第 1 条消息 AEAD 校验 | （发送方）`k=c1c04d1d h=95f52181 nonce=0` | 校验通过，同一组值 |
+| `MixHash(tag)` 后 | `ck=b355 k=c1c0 h=c2d3` | `ck=b355 k=c1c0 h=c2d3` |
+
+**未解释的一点**：responder 在算完 `e, ee` 之后得到 `ck=8167 k=8029 h=88f2`，
+而 initiator 在读第 2 条消息时**报 AEAD 校验失败**（`read_message=4`）。
+两侧在第 1 条消息校验点上完全同步，所以分歧只可能出现在第 2 条消息的 `e/ee` 处理
+或 AEAD 调用本身——这是下一步唯一要看的地方，而且现在**在本机一次运行就能看到**。
+
+**教训（本轮付了约 20 次 CI 往返）**：这类对称协议必须在同一进程内并排打印每一步，
+不要在 CI 上二分。本机此前没有 POSIX socket，这件事做不了，所以先花时间建了这个回路，
+现在它是继续推进这条用例的前提。
 
 
 ## 5. 本轮修掉的四个边界问题
