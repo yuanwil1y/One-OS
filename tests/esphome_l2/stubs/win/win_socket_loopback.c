@@ -15,6 +15,7 @@ int shim_fcntl(int fd, int cmd, ...)
 }
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,6 +289,7 @@ long shim_send(int fd, const void *buf, size_t len, int flags)
         errno = EBADF;
         return -1;
     }
+    trace("send-in", fd, (long)len);
     for (;;) {
         shim_sock_t *p = (s->peer >= 0 && s->peer < SHIM_MAX_FD) ? &g_socks[s->peer] : NULL;
         if (p == NULL || p->closed_by_peer) {
@@ -310,46 +312,48 @@ long shim_send(int fd, const void *buf, size_t len, int flags)
 
 int shim_select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv)
 {
+    /* A connection in this shim is established the moment connect() pairs the
+     * sockets, so there is never anything to wait for: report readiness from the
+     * descriptor sets the caller supplied, exactly as a real select would. Only
+     * the fds the caller asked about are examined, so an uninitialised or
+     * out-of-range number in the set cannot make this spin forever. */
     (void)tv;
     (void)ex;
-    for (;;) {
-        int ready = 0;
-        for (int fd = 0; fd < nfds && fd < SHIM_MAX_FD; fd++) {
-            if (rd != NULL && FD_ISSET(fd, rd)) {
-                shim_sock_t *s = &g_socks[fd];
-                if (s->head != s->tail || s->closed_by_peer) {
-                    fd_set only;
-                    FD_ZERO(&only);
-                    FD_SET(fd, &only);
-                    *rd = only;
-                    ready = 1;
-                    break;
-                }
-            }
-        }
-        if (ready) {
-            if (wr != NULL) {
-                FD_ZERO(wr);
-            }
-            return 1;
-        }
-        for (int fd = 0; fd < nfds && fd < SHIM_MAX_FD; fd++) {
-            if (wr != NULL && FD_ISSET(fd, wr)) {
-                /* A connected socket is always writable in this shim. */
-                fd_set only;
-                FD_ZERO(&only);
-                FD_SET(fd, &only);
-                *wr = only;
-                if (rd != NULL) {
-                    FD_ZERO(rd);
-                }
-                return 1;
-            }
-        }
-        Sleep(1);
-    }
-}
+    trace("select-in", nfds, 0);
+    int ready = 0;
+    uint64_t rbits = (rd != NULL) ? rd->bits : 0u;
+    uint64_t wbits = (wr != NULL) ? wr->bits : 0u;
 
+    for (int fd = 0; fd < nfds && fd < SHIM_MAX_FD; fd++) {
+        bool want_read = ((rbits >> (unsigned)fd) & 1ull) != 0u;
+        bool want_write = ((wbits >> (unsigned)fd) & 1ull) != 0u;
+        if (!want_read && !want_write) {
+            continue;
+        }
+        shim_sock_t *s = &g_socks[fd];
+        bool readable = (s->kind != 0) && (s->head != s->tail || s->closed_by_peer);
+        bool writable = (s->kind != 0) && (s->peer >= 0);
+        if ((want_read && readable) || (want_write && writable)) {
+            if (rd != NULL) {
+                rd->bits = (want_read && readable) ? (1ull << (unsigned)fd) : 0u;
+            }
+            if (wr != NULL) {
+                wr->bits = (want_write && writable) ? (1ull << (unsigned)fd) : 0u;
+            }
+            ready = 1;
+            break;
+        }
+        /* Asked for, but not ready: clear it so the caller does not act on it. */
+        if (rd != NULL) {
+            rd->bits &= ~(1ull << (unsigned)fd);
+        }
+        if (wr != NULL) {
+            wr->bits &= ~(1ull << (unsigned)fd);
+        }
+    }
+    trace("select-out", ready, 0);
+    return ready;
+}
 /* getaddrinfo for the numeric loopback host and port the tests use. */
 static struct addrinfo g_ai;
 static struct sockaddr_in g_ai_addr;
