@@ -74,6 +74,12 @@ typedef struct {
     uint32_t connect_timeout_seen;
     uint32_t disconnect_timeout_seen;
 
+    /* The peer the transport last handed to connect, byte for byte. This is where a
+     * test can see the byte order that reached the radio: the controller order the
+     * NimBLE backend would put straight into ble_addr_t::val. */
+    uint8_t connected_address[6];
+    uint8_t connected_address_type;
+
     /* Re-entrancy hook: when set, the read calls the session's cancel before
      * returning, which is how a test reproduces "another task cancels while a
      * read is outstanding" through the real transport and the real adapter. */

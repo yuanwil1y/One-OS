@@ -14,9 +14,9 @@
  */
 #include "app_ble_gatt_native.h"
 
-#include <stdio.h>
 #include <string.h>
 
+#include "app_ble_addr.h"
 #include "esp_timer.h"
 
 /* Records the transport's own error code for a failed call. A success clears it,
@@ -134,11 +134,26 @@ static void nat_gatt_deinit(void *ctx)
 static esp_err_t nat_gatt_connect(void *ctx, const app_ble_peer_t *peer)
 {
     app_ble_gatt_native_t *self = (app_ble_gatt_native_t *)ctx;
+    app_ble_peer_t controller_peer;
 
     if (peer == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    return note(self, esphome_ble_gatt_connect(self->transport, peer));
+    /*
+     * This is the radio boundary: the session holds display order (see
+     * app_ble_addr.h) and the transport hands the address to the controller, which
+     * wants it least significant byte first. The conversion belongs here and
+     * nowhere else in this path - the address arrived from scan evidence, which
+     * already converted it once, and converting it twice is byte-for-byte the same
+     * as not converting at all.
+     *
+     * address_type is not part of the address and is passed through unchanged.
+     */
+    controller_peer = *peer;
+    (void)app_ble_addr_to_controller(peer->address, controller_peer.address);
+    controller_peer.address_type = peer->address_type;
+
+    return note(self, esphome_ble_gatt_connect(self->transport, &controller_peer));
 }
 
 static esp_err_t nat_gatt_discover(void *ctx, app_ble_db_t *db)

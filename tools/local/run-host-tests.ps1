@@ -379,6 +379,16 @@ function Invoke-Group {
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
         }
+        'app_ble_addr' {
+            # The BLE address byte-order convention. Tiny and dependency-free; the
+            # group exists because the dangerous failure - a conversion applied
+            # twice - is byte-for-byte identical to no conversion, so the vectors
+            # are anchored to a real address written both ways.
+            Build-And-Run 'app_ble_addr' @(
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $Root 'tests\host\test_app_ble_addr.c')
+            ) @("-I$(Join-Path $m 'include')")
+        }
         'app_ble_native' {
             # The other half of the BLE boundary: the ops table the FIRMWARE
             # supplies, built on the real esphome_l2 transport. The radio is the
@@ -399,6 +409,7 @@ function Invoke-Group {
                     "-I$(Join-Path $Root 'firmware\components\esphome_l2')",
                     (Join-Path $Root 'firmware\components\esphome_l2\esphome_ble_gatt.c'),
                     (Join-Path $m 'app_ble_gatt.c'),
+                    (Join-Path $m 'app_ble_addr.c'),
                     (Join-Path $m 'app_ble_gatt_native.c'),
                     (Join-Path $Root 'tests\host\fake_ble_transport.c'),
                     (Join-Path $Root 'tests\host\test_app_ble_native.c'),

@@ -152,15 +152,29 @@ typedef struct {
  * firmware/components/esphome_l2/private/esphome_ble_gatt_internal.h.
  */
 
+/*
+ * A peer in DISPLAY order, which is what the session contract says it holds (see
+ * app_ble_gatt.h and app_ble_addr.h). The bytes are deliberately non-palindromic so
+ * a missing or doubled conversion cannot pass.
+ */
 static app_ble_peer_t peer_of(uint8_t last)
 {
     app_ble_peer_t peer;
 
     memset(&peer, 0, sizeof(peer));
+    peer.address[0] = 0xc4u;
+    peer.address[1] = 0x99u;
+    peer.address[2] = 0x4cu;
+    peer.address[3] = 0x1au;
+    peer.address[4] = 0x2bu;
     peer.address[5] = last;
     peer.address_type = 0u;
     return peer;
 }
+
+/* What the radio must receive for peer_of(0x3d): the same bytes reversed. */
+static const uint8_t PEER_WIRE[6] = {0xc4u, 0x99u, 0x4cu, 0x1au, 0x2bu, 0x3du};
+static const uint8_t PEER_CONTROLLER[6] = {0x3du, 0x2bu, 0x1au, 0x4cu, 0x99u, 0xc4u};
 
 /* Wire a session to the real transport through the real adapter. */
 static void fixture_up(fixture_t *f, bool with_radio)
@@ -542,6 +556,82 @@ static void test_subscription_and_notifications(void)
     fixture_down(&f);
 }
 
+/*
+ * The scan-to-GATT address handoff, which is the one thing the conversion tests
+ * cannot prove on their own.
+ *
+ * A byte reversal applied twice is byte-for-byte identical to never applying it, so
+ * a suite that only tested app_ble_addr.c would pass just as happily with the
+ * conversion in both places as with it in neither. What pins it is the whole path:
+ * an address in display order goes in at the session, and the bytes the radio is
+ * handed must be that address reversed - exactly once, by the adapter.
+ */
+static void test_peer_address_reaches_the_radio_once(void)
+{
+    fixture_t f;
+    fake_ble_backend_t *b;
+
+    fixture_up(&f, false);
+    b = fake_ble_backend_state();
+    if (b == NULL) {
+        CHECK(false, "the fake backend is not live");
+        return;
+    }
+
+    /* The session's peer is the display order it was given, unchanged: the session
+     * itself must not convert, or the adapter's conversion would be the second. */
+    {
+        app_ble_peer_t peer = peer_of(0x3du);
+
+        CHECK(memcmp(peer.address, PEER_WIRE, 6) == 0, "the fixture is not display order");
+        CHECK(app_ble_gatt_session_open(&f.session, &peer) == APP_BLE_OK, "open failed");
+        CHECK(memcmp(f.session.peer.address, PEER_WIRE, 6) == 0,
+              "the session altered the peer address it was given");
+        CHECK(f.session.peer.address_type == 0u, "the session altered the address type");
+    }
+
+    /* And what the radio got is the reverse, which is what NimBLE's
+     * ble_addr_t::val takes. */
+    CHECK(b->connect_calls == 1, "connect ran %d times", b->connect_calls);
+    CHECK(memcmp(b->connected_address, PEER_CONTROLLER, 6) == 0,
+          "the radio was handed the wrong byte order");
+    CHECK(memcmp(b->connected_address, PEER_WIRE, 6) != 0,
+          "the radio was handed display order, so no conversion happened");
+    CHECK(b->connected_address_type == 0u, "the address type did not reach the radio");
+
+    fixture_down(&f);
+
+    /* A second peer, so the result cannot be an accident of the first address. */
+    {
+        app_ble_peer_t peer;
+
+        memset(&peer, 0, sizeof(peer));
+        peer.address[0] = 0x7au;
+        peer.address[1] = 0x11u;
+        peer.address[2] = 0x22u;
+        peer.address[3] = 0x33u;
+        peer.address[4] = 0x44u;
+        peer.address[5] = 0x55u;
+        peer.address_type = 1u;
+
+        fixture_up(&f, false);
+        b = fake_ble_backend_state();
+        if (b == NULL) {
+            CHECK(false, "the fake backend is not live");
+            return;
+        }
+        CHECK(app_ble_gatt_session_open(&f.session, &peer) == APP_BLE_OK, "second open failed");
+        {
+            static const uint8_t expected[6] = {0x55u, 0x44u, 0x33u, 0x22u, 0x11u, 0x7au};
+
+            CHECK(memcmp(b->connected_address, expected, 6) == 0,
+                  "the second address was handed over in the wrong order");
+        }
+        CHECK(b->connected_address_type == 1u, "the second address type did not arrive");
+        fixture_down(&f);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 5. radio arbitration                                                */
 /* ------------------------------------------------------------------ */
@@ -656,6 +746,7 @@ int main(void)
     test_link_lifecycle();
     test_read_and_write();
     test_subscription_and_notifications();
+    test_peer_address_reaches_the_radio_once();
     test_radio_arbitration();
     test_cancel_inside_a_read();
 

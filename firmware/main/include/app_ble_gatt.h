@@ -57,9 +57,12 @@
 extern "C" {
 #endif
 
-/* Peers are addressed in display order: address[0] is the most significant byte as
- * printed, which is the order scan evidence carries. The adapter is responsible for
- * converting to whatever byte order the radio wants. */
+/* Peers are addressed in DISPLAY order: address[0] is the byte printed first, so a
+ * device labelled c4:99:4c:1a:2b:3d is {0xc4,0x99,0x4c,0x1a,0x2b,0x3d}. This is the
+ * order scan evidence holds and the order an operator reads, and it is what
+ * app_ble_addr.h documents. The adapter is responsible for converting to whatever
+ * byte order the radio wants - converting here as well would reverse it twice,
+ * which is byte-for-byte the same as not converting at all. */
 typedef esphome_ble_peer_t app_ble_peer_t;
 typedef esphome_ble_gatt_db_t app_ble_db_t;
 

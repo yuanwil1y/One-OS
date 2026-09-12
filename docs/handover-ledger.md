@@ -320,21 +320,60 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 *未验证*：该适配器从未对真实 peer 跑过，也没有目标构建。设备地址字节序（§ 下文第 1 条）
 仍未定，适配器目前不转换。
 
+### B7 已完成：设备地址字节序约定（本轮，commit 见 §8b）
+
+`firmware/main/app_ble_addr.{c,h}`：**BLE 地址在本应用的唯一字节序**。
+
+这不是外观问题，是一个真缺陷。BLE 地址是 6 字节，树里两种顺序都存在：
+
+- **控制器序**：射频上报、也必须交回给射频的顺序，`addr[0]` 是最低有效字节。
+  NimBLE 的 `ble_addr_t::val` 就是这个顺序（little-endian；
+  `kismet_ble_session.c` 把 `d->addr.val` 原样搬进上报，所以这正是到达应用的顺序）。
+- **显示序**（= 线上顺序）：所有面向人的地方打印的顺序，`addr[0]` 是最高有效字节，
+  读作 `c4:99:4c:1a:2b:3d`。设备标签、nRF Connect、以及识别库里
+  `BLE_PUBLIC_ADDRESS` 规则写的都是这个顺序。
+
+在应用里持有控制器序的后果是可见的：`app_device_identity_of_ble()` 生成的 device id
+会把地址**倒着打印**（标签为 `c4:99:4c:1a:2b:3d` 的设备得到 `ble_003d2b1a4c99c4`），
+既让看串口的操作员困惑，又与数据库的 `BLE_PUBLIC_ADDRESS` 匹配键不一致——因为那是按
+人读标签的方式写的。
+
+**规则**：射频边界之上，应用一律持有**显示序**；控制器序的地址在**进入应用时转换一次**
+（`app_scan_native.c` 收到上报处），此后任何地方都不得再转。适配器在**交给射频前**转回
+控制器序（`app_ble_gatt_native.c::nat_gatt_connect()`）。
+
+**为什么需要两个方向 + 交接测试**：翻转两次与不翻转**逐字节相同**。只测转换函数本身的
+测试，在"两处都转"和"两处都不转"两种情况下会同样通过。所以：
+
+- `app_ble_addr` 组（45 checks）：两个方向都钉在一个**真实地址的两种写法**上（不是我自己的
+  输出），并测往返；
+- `app_ble_native` 组新增 `test_peer_address_reaches_the_radio_once()`（该组 96 → 111 checks）：
+  从会话给出的显示序地址，一路验证到**假射频实际收到的字节**必须是它的反转。
+  我用**变异测试**验证过这个测试确实会失败：把适配器里的转换去掉后，
+  三个断言立刻报错（`the radio was handed the wrong byte order`）；恢复后全绿。
+
+写这个模块时又抓出**我自己代码里的两个错误**：原地翻转循环读到了自己刚写过的位置
+（结果是旋转而不是反转，且只对回文地址正确），以及 NULL 时返回值与头文件声明不一致。
+两者都由新测试当场抓到。
+
+*未验证*：真机上射频是否接受这个顺序（硬件清单 5b.2 项）；`app_scan_native.c` 的改动
+是 target-only，本机无法编译，由 CI 目标构建覆盖。
+
 ### B7 未完成项（明确列出）
 
-- ~~**固件适配器**~~：已完成，见上。**地址字节序**仍未定：`esphome_ble_gatt_nimble.c`
-  会反转 6 字节，而扫描证据是 NimBLE 原始顺序，两侧约定不一致，必须先定一个并写成有
-  回归表的函数；当前适配器**不做任何转换**，因此这一项仍然阻塞实机 BLE 控制。
+- ~~**固件适配器**~~：已完成，见 §"B7 已完成：固件适配器"。
+- ~~**设备地址字节序**~~：已完成，见 §"B7 已完成：设备地址字节序约定"。
 - **control 后端**：`claims`/`send` 实现并注册进 `app_control`；通知 → `app_control_report()`/
   `app_control_confirm()`。注意 `app_control_backend_ops_t::send` 不传 request_id，而确认只认
   request_id，需要扩展 vtable 或让适配器用 `app_control_pending_at()` 反查。
-- **GATT 组件自身两个缺陷**（已复核代码，未修）：
-  (a) cancel 与在途操作竞态时**返回假成功**——`wait_kind` 是单一共享字段，cancel 把它改成
-  `WAIT_DISCONNECT`，DISCONNECT 事件把 `op_status` 置 0，在途 read 的 `waitdone` 取到信号量后
-  返回 `ESP_OK`，于是 `esphome_ble_gatt_read()` 以 `*len == 0` 报告成功；`discover` 在这种竞态下
-  甚至可能返回 `ESP_OK` 加一个空数据库。
-  (b) 操作在途时调用 `deinit()` 会删除信号量并清零会话，阻塞中的调用者随后解引用
-  `i->backend == NULL`，是 use-after-free。
+- **GATT 组件自身两个缺陷**（逐行复核当前代码后的结论，与之前的记录不同）：
+  (a) ~~cancel 与在途操作竞态时返回假成功~~ **已修**（commit `19562b5`）：
+  `op_epoch`/`op_epoch_at_start` 已存在，`end()` 会把被放弃的操作改判为
+  `ESP_ERR_INVALID_STATE`。本文件此前的记录是陈旧的。
+  (b) 操作在途时调用 `deinit()` 仍会破坏状态：`deinit` 增加 `op_epoch`、调用
+  `backend->deinit()`（NimBLE 后端在这里**删除信号量**）、然后 `memset` 整个 session，
+  而阻塞中的调用者仍然持有那个指针并会在返回前访问它。`op_epoch` 只能让调用者**报告**
+  "被放弃"，不能让它在 session 已被清零之后安全地完成收尾。见下方"下一项要做的事"。
 - **实体可写性**：`app_backend_is_drivable()` 是编译期开关且对所有控制后端返回 false，
   `BLE_GATT` 的写目标因此在识别阶段就被丢掉（`app_device_db.c` 只在 drivable 时保留
   `write_target_id`），`entity_upsert_recipe()` 还会丢掉 `read_source_id`，

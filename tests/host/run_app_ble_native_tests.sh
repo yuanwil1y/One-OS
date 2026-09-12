@@ -41,6 +41,7 @@ trap 'rm -f "$OUT"' EXIT HUP INT TERM
   -I"$ROOT/firmware/components/esphome_l2" \
   "$ROOT/firmware/components/esphome_l2/esphome_ble_gatt.c" \
   "$ROOT/firmware/main/app_ble_gatt.c" \
+  "$ROOT/firmware/main/app_ble_addr.c" \
   "$ROOT/firmware/main/app_ble_gatt_native.c" \
   "$ROOT/tests/host/fake_ble_transport.c" \
   "$ROOT/tests/host/test_app_ble_native.c" \

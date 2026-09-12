@@ -8,6 +8,7 @@
  */
 
 #include "app_scan_native.h"
+#include "app_ble_addr.h"
 #include "app_str.h"
 
 #include <stdio.h>
@@ -586,7 +587,11 @@ static void ble_report_cb(const kismet_ble_report_t *report, void *ctx)
 
     memset(&obs, 0, sizeof(obs));
     obs.generation = ev->generation;
-    memcpy(obs.address, report->address, 6);
+    /* The radio reports an address least significant byte first; everything above
+     * this boundary holds display order, so this is the one place a scanned address
+     * is converted. See app_ble_addr.h - converting twice is the same as not
+     * converting, so nothing downstream may do it again. */
+    (void)app_ble_addr_to_wire(report->address, obs.address);
     obs.address_type = report->address_type;
     obs.rssi_last = report->rssi;
     obs.connectable = report->connectable;

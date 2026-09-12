@@ -277,6 +277,58 @@ static void test_ble_address_type_is_part_of_identity(void)
     CHECK(app_device_find("ble_01010203040506") != NULL, "type 1 device");
 }
 
+/*
+ * A BLE device id prints its address the way a person reads it.
+ *
+ * The generated id is the address's hex, so it is the visible consequence of the
+ * byte-order convention in app_ble_addr.h: holding the radio's order here would
+ * make the id read backwards, and it would no longer match a database's
+ * BLE_PUBLIC_ADDRESS key, which is written the way a human reads a label. The
+ * address below is a real-shaped public address in display order, and the id is
+ * pinned byte for byte rather than compared against a second call that would share
+ * the same bug.
+ */
+static void test_ble_device_id_is_display_order(void)
+{
+    static const uint8_t display[6] = {0xc4u, 0x99u, 0x4cu, 0x1au, 0x2bu, 0x3du};
+    static const uint8_t controller[6] = {0x3du, 0x2bu, 0x1au, 0x4cu, 0x99u, 0xc4u};
+    app_scan_evidence_t ev;
+    app_scan_ble_t obs;
+    char id[HA_CORE_ID_LEN];
+    bool truncated = false;
+
+    /* The identity helper is the single place the id is built, so it is checked
+     * directly as well as through materialisation. */
+    memset(&obs, 0, sizeof(obs));
+    memcpy(obs.address, display, sizeof(display));
+    obs.address_type = 0u;
+
+    CHECK(app_device_identity_of_ble(&obs, id, sizeof(id)) == strlen("ble_00c4994c1a2b3d"),
+          "the BLE id is '%s'", id);
+    CHECK(strcmp(id, "ble_00c4994c1a2b3d") == 0,
+          "a display-order address must produce a readable id, got '%s'", id);
+
+    /* The same bytes in the radio's order are a different string, which is what
+     * makes this test able to fail: a comparison against the other order is not a
+     * comparison against itself. */
+    memcpy(obs.address, controller, sizeof(controller));
+    CHECK(app_device_identity_of_ble(&obs, id, sizeof(id)) > 0u, "the reverse produced no id");
+    CHECK(strcmp(id, "ble_00c4994c1a2b3d") != 0,
+          "the two byte orders must produce different ids, or this test proves nothing");
+
+    /* And through the real path: a materialised device carries that id. */
+    app_device_table_reset();
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_ble(&ev, display, 0u, "Ordered", -50, false, 0, 100u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+
+    CHECK(app_device_count() == 1u, "one device materialised, got %u",
+          (unsigned)app_device_count());
+    CHECK(app_device_find("ble_00c4994c1a2b3d") != NULL,
+          "the materialised device id does not read in display order");
+}
+
 static void test_repeat_materialize_does_not_grow(void)
 {
     app_scan_evidence_t ev;
@@ -1126,6 +1178,7 @@ int main(void)
     test_tx_power_entity_only_when_advertised();
     test_same_bytes_different_protocol_are_different_devices();
     test_ble_address_type_is_part_of_identity();
+    test_ble_device_id_is_display_order();
     test_repeat_materialize_does_not_grow();
     test_generation_sweeps_unseen_ephemeral();
     test_unrun_protocol_does_not_sweep_its_devices();

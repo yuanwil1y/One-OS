@@ -111,6 +111,12 @@ static esp_err_t fb_connect(void *ctx, const esphome_ble_peer_t *peer, uint32_t 
     (void)peer;
     b->connect_calls++;
     b->connect_timeout_seen = timeout_ms;
+    if (peer != NULL) {
+        /* Recorded before the result check, so a test can see the byte order even on
+         * a connect that is scripted to fail. */
+        memcpy(b->connected_address, peer->address, sizeof(b->connected_address));
+        b->connected_address_type = peer->address_type;
+    }
     if (b->next_connect != ESP_OK) {
         return fb_fail(b, b->next_connect, native);
     }
