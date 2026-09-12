@@ -331,31 +331,37 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 
 ### B7 仍未完成的关键一项
 
-**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败，但根因已经缩到一个字节。**
+**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败**，但本机调试回路已经建成，
+失败被定位到**第 2 条握手消息的最后一个字节**，且**不是密钥、nonce 或 AD 的问题**。
 
-本机调试回路（本轮建成并提交，见 `tests/local-win/README.md`）：shim 本身可用，
-`D:\OS\.local-build\stubinc\` + `D:\OS\.local-build\local_enc.c` 让两端在同一进程内跑完整加密会话，
-**一次运行几秒出结果**，不再需要 CI 往返。
+本机调试回路（本轮提交，见 `tests/local-win/README.md`）：shim 可用，
+`D:\OS\.local-build\stubinc\` + `D:\OS\.local-build\local_enc.c` 把两端放进同一进程，
+**一次运行几秒出结果**。
 
-本轮用它逐层打印后的结论：
+**已逐字节排除的（两侧完全一致）**：
 
 | 检查点 | 结果 |
 |---|---|
-| prologue 后 `h`/`ck`、PSK 混入后 `ck`/`k`/`h`、`e` 混入后 `ck`/`k`/`h` | 两侧**完全一致** |
-| 第 1 条消息 AEAD（nonce/key/ad） | 两侧完全一致，peer 校验**通过** |
-| `tag` 混入后 `h` | 两侧完全一致 |
-| 第 2 条消息的 `nonce`、32 字节 `k`、32 字节 `h` | 两侧**逐字节一致** |
-| initiator 重新计算第 2 条消息的 tag | `2b 34 32 09 … 7a 09` |
-| peer 实际产生并发送的 tag | `2b 34 32 09 … 87 b4` |
-| initiator **收到**的 tag | `2b 34 32 09 … 7a 3e` |
+| prologue 后 `h`/`ck` | 一致 |
+| PSK 混入后 `ck`/`k`/`h` | 一致 |
+| `e.public_key` 混入后 `ck`/`k`/`h` | 一致 |
+| 第 1 条消息 AEAD 的 nonce/key/ad | 一致，peer 校验**通过** |
+| `tag` 混入后 `h` | 一致 |
+| 第 2 条消息的 nonce、32 字节 `k`、32 字节 `h` | 逐字节一致 |
+| 第 2 条消息 tag 的前 14 字节 | peer 产生 `2b 34 32 09 52 45 f6 08 6e 60 9b 04 7a 09`，initiator 收到同一串 |
 
-**所以分歧是：第 2 条消息（共 51 字节）在 initiator 收到的拷贝里，最后一个字节与
-peer 发送的不一致**——不是密钥、不是 nonce、不是 AD、不是长度，而是传输路径上一个字节。
-AEAD 因此校验失败（`read_message=4`），这正是整条用例失败的根因。
+**分歧点**：第 2 条消息共 51 字节（3 字节帧头 + 32 字节 `e` + 16 字节 tag）。
+peer 发出、并打印的 tag 末两字节是 `87 b4`；initiator **收到**的末两字节是 `7a 3e`。
+即**收发之间最后一个字节不同**（`0xb4` 对 `0x3e`），因此 AEAD 拒绝（`read_message=4`），
+整条用例失败。
 
-下一步只需回答一个问题：51 字节里那一个字节在哪里被改写。
-优先怀疑本机 shim 的 `send`/`recv`（它不是真实 TCP），其次是 peer 侧 `m2` 的写入顺序；
-在真实 TCP 上重现同一条打印即可区分两者。
+**下一步唯一要回答的问题**：这一个字节在哪里被改写。优先检查
+`tests/esphome_l2/noise_test_responder.c` 的 `ntr_handshake` 中 `msg2` 的写入范围，
+以及 `esphome_noise.c` 的 `encrypt_empty_payload` 是否写出了 16 字节；
+在真实 TCP 上重现同一条打印可区分"回环的问题"与"协议/tests 的问题"。
+
+**本轮我在记录与提交信息里两次把结论说过头**（先说"最后一个字节"，再说"只有 tag 的第 15 字节不同"），
+两次都被下一次运行推翻。上面这张表是当前**有打印支撑**的事实，不要再往上加推论。
 
 
 ## 5. 本轮修掉的四个边界问题
