@@ -474,6 +474,33 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 
 **仍未验证**：射频。从未有 peer 真正收到过本固件的一次写入——硬件清单 5b 项。
 
+### B7 未决：BLE 射频归属（B10 注册后端前必须先定）
+
+`app_runtime.c` 里没有任何 `app_control_register_backend()` 调用，所以运行时不会用到上面这条
+控制链。**这不是遗漏，是一个还没做的决定**，而它必须由实板回答。核实到的事实：
+
+| 事实 | 位置 |
+|---|---|
+| `ble_rf` 阶段的会话**自己拥有整个 NimBLE 端口生命周期**：`nimble_port_init()` 起、`nimble_port_run()` 跑、扫描结束后 `nimble_port_stop()` + `nimble_port_deinit()` 拆 | `kismet_ble_session.c:189`、`:106`、`:253`、`:257` |
+| GATT 会话用的是**同一个 NimBLE 主机栈**（`ble_gap_connect`、`ble_gattc_*`） | `esphome_ble_gatt_nimble.c` |
+| 所以一次扫描结束后，NimBLE 端口**已被 deinit**，此时 `esphome_ble_gatt_init()` 里的 `ble_gap_connect()` 没有已初始化的栈可用 | 由上两条推出 |
+| 扫描阶段是**串行**的，射频交接已经有一套既有约定（隔离、`radio_available`、`destroy_checked`） | `app_scan_native.c:171`、`:359` |
+
+**必须做的决定**：BLE 控制会话的 NimBLE 端口由谁持有、什么时候初始化？可选的三种，各自代价：
+
+1. **按需再 init**：控制时若端口未起就 `nimble_port_init()`，用完再 deinit。代价是每次控制一次
+   栈初始化（时间与堆抖动）；需要确认 IDF/NimBLE 在这个版本上支持反复 init/deinit，**这一条只有
+   实板能证实**。
+2. **常驻端口**：让控制会话持有端口，扫描阶段借用。代价是 BLE 栈常驻 RAM，直接和 B11 的
+   heap 预算相关；而且 `kismet_ble_session` 目前的 `nimble_port_init/deinit` 必须改成借还模型。
+3. **不接线**：保持 `NO_BACKEND`，直到有实板能测出上面两种哪个可行。
+
+**在所有三种里，现在都不应该注册后端**：方案 3 之外，方案 1 和 2 都要改 `kismet_ble_session`
+的所有权模型，而那需要实板验证；在没验证前注册，会让每条控制报 `backend_failed`——
+**比现在诚实的 `NO_BACKEND` 更糟**。
+
+这条要在有板子时**第一个**回答，因为它同时决定 B7 的收尾和 B10 的注册。
+
 ### B7 未完成项（明确列出）
 
 - ~~**固件适配器**~~：已完成，见 §"B7 已完成：固件适配器"。
