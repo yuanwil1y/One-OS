@@ -114,7 +114,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B5 SD 读取/识别/配方 | 完成 | 通过 | 通过 | 未做 | §3 全部：真卡挂载、`/nearby/db/devices.nbdb` 路径、缺卡/坏库/版本不符、读取期间换库、重复 enrichment 不产生重复实体 |
 | B6 配网与导入 | 完成 | 通过 | 通过 | 未做 | §4：NVS 重启后凭据恢复、APSTA 实测、浏览器交互、上传中断与断电恢复、替换失败保留旧库；HTTP transport 无自动测试 |
 | B7 BLE GATT | 软件完成 | 通过 | 通过 | 未做 | §5b 全 9 项 + §5b-bis 7 项；**运行时不注册后端**（见射频归属决定） |
-| B7 ESPHome | 软件完成 | 通过 | 通过 | 未做 | §5c 7 项 + §5c-bis 7 项；**ESPHome 设备识别身份未定**（见 §"ESPHome 设备根本无法被识别"）；`test_api_client` 加密路径仍失败（§4d） |
+| B7 ESPHome | 软件完成 | 通过 | 通过 | 未做 | §5c 7 项 + §5c-bis 7 项；**识别身份已定并实现**（mDNS instance 名，见 §"B7 已决"），语料含 profile 1006；**仍未做**：运行时不注册后端、node 从未被连接过、`test_api_client` 的加密路径仍失败（§4d） |
 | B8 Zigbee | **未开始** | 部分（已有 11 个测试覆盖超时/重试/last-good） | 通过 | — | `esp_zigbee` 依赖不存在；coordinator 生命周期、入网、interview、ZCL 读写/命令、报告、网络持久化**全部未实现**；`APP_STAGE_ZIGBEE` 固定返回 `zigbee_backend_unavailable` |
 | B9 OpenThread | 部分 | 通过 | 通过 | 未做 | Thread 生命周期、持久化、与射频交接未接应用 |
 | B9 Matter | **构建失败** | 通过 | 失败 | — | §4e：`app/StatusIB.h` 在该 pin 上不存在；需要 pin 决定 |
@@ -1020,8 +1020,8 @@ DATABASE 部署：把 `devices.nbdb` 放到卡的 `/nearby/db/` 目录（即
 | **microSD 卡（FAT32，含 `/nearby/db/`）** | 插入一张卡 | 清单 0.2、3.x；真实库读取与上传 |
 | **一块可控 GATT 外设** | 第二块 ESP32 跑 `bleprph`，或 Linux 主机跑 BlueZ `btgatt-server` | B7 BLE 控制端到端（清单 5b.10–5b.16）——**这是最便宜的单点解锁**，也是唯一能证实"写错 handle 会静默成功"这件事的装置 |
 | **一台可访问的 ESPHome 节点 + 其 API 加密密钥** | 节点地址 + key | B7 ESPHome 端到端（清单 5c.x）；同时是那条 404/握手修复的最终判据 |
-| **一个决定：ESPHome 设备的识别身份用哪一种** | 从 §"ESPHome 设备根本无法被识别"的三个选项里选一个（mDNS instance 名 / API 自报名 / 不自动识别） | 让 ESPHome 设备**可能**被识别；这是"加一条 ESPHOME 配方"能起作用的前提 |
-| **一条 `ESPHOME_API` 可写配方** | 语料里加一条 recipe，`write_target_id` = 真实节点上的实体 key | 让 ESPHome 侧**有东西可控**——目前 fixture 里一条都没有。**注意**：这一步在"识别身份"那个决定之前是无效的，因为 ESPHome 设备压根匹配不到 profile |
+| **一个决定：ESPHome 设备的识别身份用哪一种** | ~~已完成~~：按仓库已有约定选了 mDNS instance 名并实现（§"B7 已决"），**不再需要你决定** | — |
+| **一条 `ESPHOME_API` 可写配方** | ~~已在 fixture 里加好~~（profile 1006，键为 mDNS instance）。真机使用时需要把它换成**真实节点**的 instance 名与实体 key——ESPHome 的 key 是节点自行分配的不透明 u32，无法从 object_id 推导 | 让 ESPHome 侧在新板上立刻可控 |
 | **一个标准 Zigbee 设备** | 任一 Zigbee 灯具/开关 | B8 的验收；同时是 `esp_zigbee` 依赖是否值得引入的判据 |
 | **一个 Thread Border Router 或 dataset** | 可用的 Thread 网络 | B9 Thread 侧 |
 | **Matter 的 pin 决定** | 在 CHIP 侧确认：`539342f` 里 `StatusIB` 的真实位置，或换一个包含它的 pin | B9 Matter 构建（见 §4e；本机无法查证，需要一次可访问 CHIP 检出的排查） |
