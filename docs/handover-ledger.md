@@ -331,22 +331,27 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 
 ### B7 仍未完成的关键一项
 
-**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败**，且失败点在
-"客户端等待 server hello"这一步：客户端读到超时（`ESP_ERR_TIMEOUT`），而 peer 的记录显示它
-已经发出了握手头与 48 字节消息。上面 6 个缺陷修复后，失败点被推到了这里，但**尚未定位**。
+**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败。** 本轮把失败点从
+"客户端等不到 server hello"推到了 **`esphome_noise_read_message()` 对 responder 的第 2 条消息
+AEAD 校验失败**（诊断输出 `C read_message=4`，`ck=`/`k=` 两侧不同），但**没有定位到根因**。
 
-**重要：这一条是测试/驱动层面的问题，不是协议层问题。** 协议层由 `test_noise.c` 的钉死向量
-（由独立的 Python 实现生成）、规范级 responder 的完整交换、以及 `test_noise_crypto.c` 的
-RFC 向量覆盖，全部通过。
+必须把已知与未知分清：
 
-**本机已经能把它跑到失败点**：`tests/esphome_l2/stubs/win/`（进程内 socket 回环）配
-`tools/local/build-win-shim-test.ps1` 可以在 Windows 上编译并运行这条用例；本轮的排查脚本
-`D:\OS\.local-build\enc_probe.c` 复现了同一路径，并证明客户端与 peer 的握手是成功的
-（peer 打印 `handshake ok`、`server hello sent`），失败发生在随后的读取上。
-**下一次接手请继续在这里本机调试，不要在 CI 上二分**——本轮为此花了 12 次 CI 往返。
+- **已知**：协议层本身是对的。`test_noise.c` 用独立 Python 实现生成的钉死向量、一个按规范直写的
+  responder 的完整交换、以及 `test_noise_crypto.c` 的全部 RFC 向量都通过；固件目标构建通过。
+- **已知**：握手第 1 条消息是被 responder 接受并成功解密的（peer 打印 `handshake ok`），
+  说明 PSK、prologue、协议名在两侧一致。
+- **未知**：为什么 responder 在解第 1 条消息前的 `ck` 与 initiator 在同一时刻的 `ck` 不同。
+  这是根因所在，也是下一步唯一要看的东西。
+- **已排除**：`noise_test_responder.c` 的 `ntr_reset` 两次调用、prologue 长度差异（12 对 14，
+  `test_noise.c` 用 12 与实现一致）、PSK 传递（两侧都打印 `psk0=a0a1`）。
 
-`recv` 在回环里可能只返回缓冲区里已有的部分字节；`rall` 本身是循环的，所以真实
-TCP 上不会出问题，但回环的行为与真实 socket 的这一处差异值得先排除。
+**教训（本轮付了约 20 次 CI 往返）**：这类对称协议的不一致必须在同一进程内并排调试，
+不要在 CI 上用打印语句二分。本机为此建了 `tests/esphome_l2/stubs/win/`（进程内 socket 回环）
+与 `tools/local/run-win-shim-test.ps1`，但**该 harness 尚未完成**：它能跑明文半边，
+加密半边会死锁，且自身还有两处编译问题（`select` 的 `fd_set`/`timeval` 类型、
+`struct addrinfo` 只做了前向声明）。`tests/esphome_l2/stubs/win/README.md` 写明了这些。
+镜像因此仍把 `test_api_client` 的编译报成失败，而不是静默调用一个不能用的 harness。
 
 
 ## 5. 本轮修掉的四个边界问题
