@@ -26,6 +26,9 @@ done when the evidence exists.
 | 0.3 | `firmware/sdkconfig.defaults` unchanged; `idf.py set-target esp32c6`. |
 | 0.4 | Build: `cd firmware && idf.py build`. Record the `one_os.bin` size **and** the `idf.py size` output. The binary size is not a RAM measurement. |
 | 0.5 | Flash: `idf.py -p <PORT> flash monitor`. Record the boot log verbatim from reset. |
+| 0.6 | Optional but decides B7: a second ESP32 running the ESP-IDF `bleprph` example (or a Linux host with BlueZ `btgatt-server`) as a controllable GATT peripheral. |
+| 0.7 | Optional but decides B7: an ESPHome node reachable on the same LAN, with its API encryption key. |
+| 0.8 | Optional but decides B8: a standard Zigbee device and, if the device is not already on a network, a way to put it into pairing mode. |
 
 ## 1. Boot and diagnostics
 
@@ -78,14 +81,60 @@ done when the evidence exists.
 
 ## 5. Control (B10)
 
+The control loop is now the path the `control` command actually takes
+(`firmware/main/app_runtime.c` calls `app_control_submit()`). With no backend
+registered the correct answer is `NO_BACKEND`; the items below need a real
+writable device.
+
 | | Check | Expected | Evidence |
 |---|---|---|---|
-| 5.1 | A real ESPHome or Zigbee device, with a writable recipe in the corpus | needed before anything below can run | — |
-| 5.2 | Send a control | The entity goes **pending**, not straight to the requested state | serial log |
-| 5.3 | The device confirms | The state changes then | serial log |
-| 5.4 | Send a control the device refuses | The state returns to the previous confirmed value; the error is reported | serial log |
-| 5.5 | Send a control, then pull the device's power before it answers | The control times out and the previous state is restored | serial log |
-| 5.6 | Send two controls for one entity at once | The second is refused BUSY | serial log |
+| 5.1 | `request 20 control switch.nothing turn_on` with no backend registered | refused with `unsupported`, detail `no_backend` — **not** `ok` and **not** `not_implemented` | serial log |
+| 5.2 | `request 21 control <entity> <action>` for an entity that does not exist | refused `not_found`, detail `unknown_entity` | serial log |
+| 5.3 | `request 22 control <entity> <bad-action>` for a known entity | refused `unsupported` | serial log |
+| 5.4 | `request 23 control <entity> <action> <out-of-range value>` | refused `invalid_argument`, detail `out_of_range` | serial log |
+| 5.5 | Two controls for one entity without the first completing | second refused `busy` | serial log |
+| 5.6 | A real ESPHome or Zigbee device, with a writable recipe in the corpus | needed before anything below can run | — |
+| 5.7 | Send a control | Accepted, and the response names the state as `pending` — not the requested state | serial log |
+| 5.8 | The device confirms | The state changes only then | serial log |
+| 5.9 | Send a control the device refuses | The state returns to the previous confirmed value; the error is reported | serial log |
+| 5.10 | Send a control, then pull the device's power before it answers | The control times out and the previous state is restored | serial log |
+| 5.11 | Scan again while a control is pending, and let the device vanish | `reconcile` fails the pending control rather than leaving it pending forever | serial log |
+
+## 5b. BLE GATT central (B7)
+
+The session module (`firmware/main/app_ble_gatt.c`) is host-tested with a
+scripted backend; nothing below has been run against a radio, and the firmware
+adapter that binds it to `esphome_ble_gatt_*` does not exist yet. **These items
+are blocked on that adapter**, and are listed so the work is visible.
+
+| | Check | Expected | Evidence |
+|---|---|---|---|
+| 5b.1 | A second ESP32 running the ESP-IDF `bleprph` example, or a Linux host with BlueZ `btgatt-server` | needed before anything below can run | — |
+| 5b.2 | Scan, then `request 5 devices`; compare the printed address with the peripheral's own | the byte order is the one the scan evidence uses — this settles the address-order question in the ledger | serial log + peripheral log |
+| 5b.3 | Open a GATT session | connect and discovery run exactly once; the radio is held for the session and handed back on close | serial log |
+| 5b.4 | Compare the discovered service/characteristic/descriptor counts with nRF Connect's view | identical, and `truncated` set if the peer exceeds the session's bounds | screenshots + serial log |
+| 5b.5 | Read a known characteristic, then one whose value exceeds the buffer | byte-exact value; the oversized read is refused, not truncated silently | serial log |
+| 5b.6 | Write a characteristic with and without response; then write a read-only one | the peripheral's value changes; the refusal is a named error | serial log |
+| 5b.7 | Subscribe, notify twice, then `cancel` mid-notification | both notifications delivered; **no callback after cancel returns**, and no crash | serial log |
+| 5b.8 | Cut the peripheral's power mid-operation | the operation reports `peer_gone`, not success | serial log |
+| 5b.9 | 100 × connect/discover/subscribe/notify/close against two peripherals, alternating | min free heap does not trend down; the second peripheral never appears pre-disconnected | serial log over 100 rounds |
+
+## 5c. ESPHome Native API (B7)
+
+Noise is implemented from the specification and verified against RFC vectors,
+pinned cross-implementation fixtures and a loopback responder. **None of it has
+met a real ESPHome node**, and one end-to-end test failure in the host suite is
+still open (ledger §4d), so these items are the only way to settle it.
+
+| | Check | Expected | Evidence |
+|---|---|---|---|
+| 5c.1 | A real ESPHome node on the LAN plus its API encryption key | needed before anything below can run | — |
+| 5c.2 | Connect with the correct key | handshake completes; the probe reports the node's name, model and version | serial log |
+| 5c.3 | Connect with a wrong key | `auth_required` reported; **no plaintext fallback is attempted** | serial log + node log |
+| 5c.4 | Connect with no key to a node that requires one | refused, never sent in the clear | serial log + node log |
+| 5c.5 | Entity discovery | the node's entities appear with names, units and device classes | serial log |
+| 5c.6 | Send a control, then change the state on the node itself | the command is accepted; observed state moves only from the node's report | serial log |
+| 5c.7 | Restart the node mid-session | the session reports the disconnect and reconnects; no duplicate entities appear | serial log |
 
 ## 6. Resources
 
@@ -106,8 +155,13 @@ exist, **no RAM or stack figure for this project may be quoted.**
 ## 7. What to do with the results
 
 For each item: the outcome, the commit, the serial log, and any measurement taken. Items
-that cannot be run (no ESPHome node, no Zigbee device) stay marked as blocked with the
-reason — not as passed, and not as failed.
+that cannot be run (no GATT peripheral, no ESPHome node, no Zigbee device) stay marked as
+blocked with the reason — not as passed, and not as failed.
+
+Sections 5b and 5c are additionally blocked on code that does not exist yet, not only on
+hardware: 5b needs the firmware adapter that binds `app_ble_gatt` to `esphome_ble_gatt_*`,
+and 5c needs the same layer for the Native API session. Record them as blocked on that,
+so the distinction between "needs hardware" and "needs work" stays visible.
 
 The hardware column of the stage table in `docs/handover-ledger.md` is updated from
 these results and from nothing else.
