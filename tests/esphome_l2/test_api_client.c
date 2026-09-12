@@ -40,11 +40,11 @@ for(unsigned i=0;i<32;i++)priv[i]=(uint8_t)(0x40u+i);
 memcpy(peer_psk,g_psk,32);
 if(g_noise_mode==1)peer_psk[0]^=0xffu;
 ntr_reset(&st,peer_psk,(const uint8_t*)ESPHOME_NOISE_PROLOGUE,priv,NULL);
-{uint8_t p4[4];assert(allr(fd,p4,4));fprintf(stderr,"STEP1 hello %02x%02x%02x%02x\n",p4[0],p4[1],p4[2],p4[3]);fflush(stderr);assert(p4[0]==0x00&&p4[1]==0x01&&p4[2]==0x00&&p4[3]==0x00);}
-{uint8_t sh[3];assert(allr(fd,sh,3));fprintf(stderr,"STEP2 hdr %02x%02x%02x (len=%u)\n",sh[0],sh[1],sh[2],(unsigned)(((unsigned)sh[1]<<8)|sh[2]));fflush(stderr);assert(sh[0]==0x01&&(((unsigned)sh[1]<<8)|sh[2])==48u);}
-assert(allr(fd,m1,48));fprintf(stderr,"STEP3 m1 %02x%02x..%02x%02x\n",m1[0],m1[1],m1[46],m1[47]);fflush(stderr);
-if(!ntr_handshake(&st,m1,m2)){fprintf(stderr,"STEP4 handshake rejected\n");fflush(stderr);/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
-{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;assert(allw(fd,hdr,3));fprintf(stderr,"PEER sent hdr %02x%02x%02x\n",hdr[0],hdr[1],hdr[2]);fflush(stderr);assert(allw(fd,m2,48));fprintf(stderr,"PEER sent m2 %02x%02x..%02x%02x\n",m2[0],m2[1],m2[46],m2[47]);fflush(stderr);
+assert(allr(fd,m1,4)&&m1[0]==0x00&&m1[1]==0x01&&m1[2]==0x00&&m1[3]==0x00);
+{uint8_t sh[3];assert(allr(fd,sh,3));assert(sh[0]==0x01&&(((unsigned)sh[1]<<8)|sh[2])==48u);}
+assert(allr(fd,m1,48));
+if(!ntr_handshake(&st,m1,m2)){/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
+{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;assert(allw(fd,hdr,3)&&allw(fd,m2,48));
 if(g_noise_mode==2){/* Handshake accepted, then frames that are not authentic
  * ciphertext: the client must drop them, never dispatch them, and eventually
  * disconnect rather than loop forever. */
@@ -52,7 +52,7 @@ uint8_t junk[8]={0x01,0x00,0x10,1,2,3,4,5};
 for(int i=0;i<32;i++){(void)send(fd,junk,sizeof(junk),0);}
 close(fd);return NULL;}
 /* HelloRequest is the first encrypted frame. */
-{uint8_t f3[3];assert(allr(fd,f3,3));fprintf(stderr,"STEP6 frame %02x%02x%02x\n",f3[0],f3[1],f3[2]);fflush(stderr);assert(f3[0]==0x01);fr[0]=f3[0];fr[1]=f3[1];fr[2]=f3[2];}n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));
+assert(allr(fd,fr,3)&&fr[0]==0x01);n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));
 assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==1&&n==0);
 esphome_pb_writer_t w;esphome_pb_writer_init(&w,pl,sizeof(pl));esphome_pb_put_varint(&w,1,1);esphome_pb_put_varint(&w,2,15);esphome_pb_put_string(&w,3,"ESPHome 2026.8.0",32);esphome_pb_put_string(&w,4,"noise-node",31);size_t fl=ntr_seal(&st,2,pl,w.len,fr,sizeof(fr));assert(fl&&allw(fd,fr,fl));
 /* DeviceInfoRequest / response. */
