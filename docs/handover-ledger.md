@@ -29,7 +29,8 @@
 
 ### 远端分支情况（实测，非文档推断）
 
-`git ls-remote --heads origin` 的实际结果：只有 `main` 与 `research/matter-chip-tool-l2-api`。
+`git ls-remote --heads origin` 的实际结果：只有 `main`、`feat/b6-http-portal` 与
+`research/matter-chip-tool-l2-api`。
 B5 的工作分支 `feat/b5-recognition` 在 PR #20 合并后**已删除**（合并提交
 `74facd3` 保留了全部历史，工作树无本地独有提交）。
 
@@ -44,6 +45,24 @@ B5 自己的分支。
 
 教训：判断远端状态用 `git ls-remote`（或 `git fetch --prune` 之后的 `git branch -r`），
 不要直接用 `git branch -a`——后者在没有 prune 的情况下会保留已删除分支的引用。
+
+### 本分支上的提交与 CI（`feat/b6-http-portal`，PR #21）
+
+| 提交 | 内容 |
+|---|---|
+| `05f8de3` … `272c81d` | B6 临时配网 AP（见 §4b） |
+| `76514ce` | B7：ESPHome 认证 Noise 传输（`esphome_noise*.c`）与 host 证据 |
+| `7a886b8` | 修 CI：一个 gcc 报、clang 不报的未使用变量 |
+| `73a5dc3` | B7：BLE GATT 会话（`app_ble_gatt.{c,h}`）与新 host 组 `app_ble_gatt` |
+| `4166050` | 文档：§4d 与 B10 状态更正 |
+| `c22235f` | 修目标构建：`impl_t` 缺 `noise_psk`；`hardclose` 在 `nwipe` 定义前调用它 |
+| `19562b5` | 修 BLE GATT 组件：cancel 竞态不再返回假成功 |
+| `385978d` `ccd050c` `6daa2b3` | 修加密会话用例：真正订阅 off 回调；明文会话拒绝命令的错误码 |
+| `713e39b` | 未完成的 Windows socket shim 不接入 runner，只作为文档化工具保留 |
+
+**目标构建（`build` job）在 `c22235f`、`19562b5`、`385978d`、`713e39b` 上均已通过。**
+host-tests job 在 `6daa2b3` 之前的每一次失败都是一处不同的真实缺陷，逐条记在 §4d 的
+"编译期教训"里。
 
 ## 2. 本地环境（本机没有任何 C 工具链，默认状态）
 
@@ -78,7 +97,6 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 通过，只在 CI 验证。
 
 ## 3. 阶段状态表
-
 | 阶段 | 代码 | host | 构建 | 实板 | 未完成项 |
 |---|---|---|---|---|---|
 | B0 构建/诊断入口 | 完成 | 通过 | 通过 | 未做 | 资源字段从未在实板取过值 |
