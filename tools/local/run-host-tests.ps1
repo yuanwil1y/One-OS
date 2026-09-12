@@ -416,6 +416,30 @@ function Invoke-Group {
                     '-o', $exe))
             Invoke-Step 'run test_app_ble_native' $exe @()
         }
+        'app_ctl_ble' {
+            # The BLE GATT control backend, driven through the REAL app_control loop.
+            # The property it protects is that a successful send is not a state
+            # change, so the assertions are about order: after the send, after the
+            # write, and only then after the device reports.
+            Build-And-Run 'app_ctl_ble' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $m 'app_ctl_ble.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_ble.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
         'app_acceptance' {
             Build-And-Run 'app_acceptance' @(
                 (Join-Path $hc 'ha_core.c'),
