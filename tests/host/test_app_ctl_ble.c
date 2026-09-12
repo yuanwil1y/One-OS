@@ -151,6 +151,15 @@ static app_ctl_ble_t g_ctl;
  * for that reason and is compiled out of the firmware image. */
 #define TEST_ENTITY "switch.test_bulb"
 #define TEST_DEVICE "ble_00c4994c1a2b3d"
+/*
+ * A second entity that advertises the actions whose CONFIRMATION path is different:
+ * set_value (a value the device must report back) and press (an action no backend can
+ * derive a target state from). Without these the loop refuses those actions before a
+ * backend sees them, and the tests below would pass by never reaching the code they
+ * exist to check - which is how they read on their first run.
+ */
+#define TEST_VALUE_ENTITY "light.test_dimmer"
+#define TEST_PRESS_ENTITY "button.test_press"
 
 /*
  * Install the backend into a freshly reset control loop.
@@ -213,8 +222,41 @@ static void fixture_up(bool ready)
     entity.supported_services = HA_SERVICE_MASK_TURN_ON | HA_SERVICE_MASK_TURN_OFF;
     CHECK(ha_core_entity_upsert(&entity) == HA_CORE_OK, "the test entity was not inserted");
 
+    /* The dimmer: set_value is the action whose confirmation depends on the device
+     * reporting the value it was given. */
+    memset(&entity, 0, sizeof(entity));
+    (void)app_strlcpy(entity.entity_id, TEST_VALUE_ENTITY, sizeof(entity.entity_id));
+    (void)app_strlcpy(entity.unique_id, TEST_VALUE_ENTITY, sizeof(entity.unique_id));
+    (void)app_strlcpy(entity.platform, "nearby", sizeof(entity.platform));
+    (void)app_strlcpy(entity.domain, "light", sizeof(entity.domain));
+    (void)app_strlcpy(entity.device_id, TEST_DEVICE, sizeof(entity.device_id));
+    (void)app_strlcpy(entity.name, "Test Dimmer", sizeof(entity.name));
+    entity.has_entity_name = true;
+    entity.enabled = true;
+    entity.available = true;
+    entity.supported_services = HA_SERVICE_MASK_SET_VALUE;
+    CHECK(ha_core_entity_upsert(&entity) == HA_CORE_OK, "the dimmer was not inserted");
+
+    /* The button: an action with no derivable target state. */
+    memset(&entity, 0, sizeof(entity));
+    (void)app_strlcpy(entity.entity_id, TEST_PRESS_ENTITY, sizeof(entity.entity_id));
+    (void)app_strlcpy(entity.unique_id, TEST_PRESS_ENTITY, sizeof(entity.unique_id));
+    (void)app_strlcpy(entity.platform, "nearby", sizeof(entity.platform));
+    (void)app_strlcpy(entity.domain, "button", sizeof(entity.domain));
+    (void)app_strlcpy(entity.device_id, TEST_DEVICE, sizeof(entity.device_id));
+    (void)app_strlcpy(entity.name, "Test Button", sizeof(entity.name));
+    entity.has_entity_name = true;
+    entity.enabled = true;
+    entity.available = true;
+    entity.supported_services = HA_SERVICE_MASK_PRESS;
+    CHECK(ha_core_entity_upsert(&entity) == HA_CORE_OK, "the button was not inserted");
+
     app_device_test_bind_entity(TEST_ENTITY, TEST_DEVICE, DEVICE_DB_BACKEND_BLE_GATT, true, 0,
                                 100);
+    app_device_test_bind_entity(TEST_VALUE_ENTITY, TEST_DEVICE, DEVICE_DB_BACKEND_BLE_GATT, true,
+                                0, 255);
+    app_device_test_bind_entity(TEST_PRESS_ENTITY, TEST_DEVICE, DEVICE_DB_BACKEND_BLE_GATT, false,
+                                0, 0);
 
     backend.ops = app_ctl_ble_backend_ops();
     backend.ctx = &g_ctl;
@@ -416,6 +458,171 @@ static void test_an_unresolvable_handle_is_refused(void)
     CHECK(g_ctl.refused_no_handle == 1u, "the refusal was not recorded");
 }
 
+/*
+ * A value-carrying control CAN be confirmed.
+ *
+ * The bounded version of this backend derived an expected state only for turn_on /
+ * turn_off, so a set_value that the device obeyed could never confirm: it ran to its
+ * deadline and was reported as a failure. That is a false negative in the worst
+ * direction - the operator is told a device that worked did not answer - and it is
+ * invisible in every test that only exercised switches.
+ *
+ * The comparison is strict text: the device must report the value it was given. A
+ * mismatch costs one confirmation window rather than publishing a wrong state.
+ */
+static void test_a_value_control_is_confirmed_by_its_own_value(void)
+{
+    app_control_slot_t *slot = NULL;
+    app_control_status_t status;
+
+    fixture_up(true);
+    status = app_control_submit(TEST_VALUE_ENTITY, "set_value", "128", 50u, g_now_ms, 5000u, &slot);
+    REQUIRE(status == APP_CONTROL_OK && slot != NULL,
+            "set_value returned %s for an entity that advertises it",
+            app_control_status_name(status));
+
+    REQUIRE(app_ctl_ble_tick(&g_ctl), "the write did not start");
+    /* 128 encoded as a one-byte register. */
+    CHECK(g_gatt.written_len == 1u && g_gatt.written[0] == 0x80u,
+          "set_value wrote %u bytes starting 0x%02x", (unsigned)g_gatt.written_len,
+          g_gatt.written_len > 0u ? g_gatt.written[0] : 0u);
+
+    /* The device reports the value it was given. */
+    {
+        const uint8_t reported = 0x80u;
+
+        app_ctl_ble_on_notify(&g_ctl, TEST_VALUE_HANDLE, &reported, 1u, false);
+        CHECK(app_ctl_ble_tick(&g_ctl), "the tick did not act on the device's report");
+    }
+    CHECK(g_ctl.confirmations == 1u, "an obedient device was not confirmed (counted %u)",
+          (unsigned)g_ctl.confirmations);
+    CHECK(app_ctl_ble_inflight_count(&g_ctl) == 0u, "the control is still in flight");
+}
+
+/*
+ * An action the codec cannot encode is UNSUPPORTED, without guessing a byte to send.
+ *
+ * `press` is such an action: app_ble_gatt_encode_action() implements turn_on/turn_off,
+ * set_value and set_text, and refuses the rest. The backend passes that refusal up
+ * rather than inventing an encoding, which is how a device gets written with garbage.
+ *
+ * This also closes the "sent but unconfirmable" case by construction: every action
+ * this backend CAN send is either a named state (turn_on/turn_off) or carries the
+ * value the device must report back (set_value/set_text). The reason string for the
+ * remaining case stays in app_ctl_ble_tick() as a guard for a future action that has
+ * neither; it is not reachable today, and this test records why rather than pretending
+ * to exercise it.
+ */
+/*
+ * A value control is confirmed by the value the DEVICE reports, whatever the codec
+ * scaled it to.
+ *
+ * A recipe's `scale` is how the corpus expresses a register in tenths: the codec
+ * multiplies the requested value before putting it on the wire, so an obedient device
+ * reports the SCALED number and not the one the user typed. Comparing against the
+ * unscaled request would never match, and a working control would be reported as a
+ * device that never answered - a silent false negative, which is the failure mode this
+ * whole case exists to prevent.
+ *
+ * The assertion is written against what the codec actually wrote rather than a literal,
+ * so it holds for any scale: whatever went on the wire is what an obedient device
+ * echoes, and that must confirm.
+ */
+static void test_a_value_is_confirmed_by_what_was_written(void)
+{
+    app_control_slot_t *slot = NULL;
+    app_control_status_t status;
+
+    fixture_up(true);
+    status = app_control_submit(TEST_VALUE_ENTITY, "set_value", "12", 52u, g_now_ms, 5000u,
+                                &slot);
+    REQUIRE(status == APP_CONTROL_OK && slot != NULL, "set_value returned %s",
+            app_control_status_name(status));
+    REQUIRE(app_ctl_ble_tick(&g_ctl), "the write did not start");
+    REQUIRE(g_gatt.written_len == 1u, "the write carried %u bytes",
+            (unsigned)g_gatt.written_len);
+
+    {
+        const uint8_t reported = g_gatt.written[0];
+
+        app_ctl_ble_on_notify(&g_ctl, TEST_VALUE_HANDLE, &reported, 1u, false);
+        CHECK(app_ctl_ble_tick(&g_ctl), "the tick did not act on the device's report");
+    }
+    CHECK(g_ctl.confirmations == 1u,
+          "a device that reported exactly what it was sent was not confirmed (counted %u)",
+          (unsigned)g_ctl.confirmations);
+    CHECK(app_ctl_ble_inflight_count(&g_ctl) == 0u, "the control is still in flight");
+}
+
+/*
+ * A SCALED recipe is confirmed by the scaled value the device reports.
+ *
+ * `scale` is how the corpus expresses a register in tenths: the codec multiplies the
+ * requested value before putting it on the wire, so an obedient device reports the
+ * SCALED number and not the one the user typed. Comparing against the unscaled request
+ * would never match, and a working control would be reported as a device that never
+ * answered - a silent false negative, and the reason this case exists.
+ *
+ * The binding hook does not carry a scale (a recipe's scale is resolved at recognition
+ * time, which app_device_db covers), so this sets one on the binding the loop routes and
+ * then drives the backend. Every value here is a whole number on purpose: the loop
+ * refuses a fractional value against an integer range, which is its own correct rule and
+ * is covered in the control group.
+ */
+static void test_a_scaled_recipe_expects_the_scaled_value(void)
+{
+    app_control_slot_t *slot = NULL;
+    app_control_status_t status;
+    app_entity_binding_t *binding;
+
+    fixture_up(true);
+
+    binding = (app_entity_binding_t *)app_control_lookup(TEST_VALUE_ENTITY);
+    REQUIRE(binding != NULL && binding->writable, "the dimmer is not a writable binding");
+    binding->scale = 10u; /* tenths */
+
+    status = app_control_submit(TEST_VALUE_ENTITY, "set_value", "12", 53u, g_now_ms, 5000u,
+                                &slot);
+    REQUIRE(status == APP_CONTROL_OK && slot != NULL, "set_value returned %s",
+            app_control_status_name(status));
+    REQUIRE(app_ctl_ble_tick(&g_ctl), "the write did not start");
+
+    /* The codec scaled it: twelve tenths is register 120. */
+    CHECK(g_gatt.written_len == 1u && g_gatt.written[0] == 120u,
+          "a scale-10 recipe wrote %u bytes starting 0x%02x, expected 120",
+          (unsigned)g_gatt.written_len, g_gatt.written_len > 0u ? g_gatt.written[0] : 0u);
+
+    /* A device reporting the SCALED value has obeyed, and must be confirmed. Comparing
+     * against the unscaled "12" is what this asserts against. */
+    {
+        const uint8_t reported = 120u;
+
+        app_ctl_ble_on_notify(&g_ctl, TEST_VALUE_HANDLE, &reported, 1u, false);
+        CHECK(app_ctl_ble_tick(&g_ctl), "the tick did not act on the device's report");
+    }
+    CHECK(g_ctl.confirmations == 1u,
+          "a device reporting the scaled value was not confirmed (counted %u)",
+          (unsigned)g_ctl.confirmations);
+    CHECK(app_ctl_ble_inflight_count(&g_ctl) == 0u, "the control is still in flight");
+}
+
+static void test_an_action_the_codec_cannot_encode_is_refused(void)
+{
+    app_control_slot_t *slot = NULL;
+    app_control_status_t status;
+
+    fixture_up(true);
+    status = app_control_submit(TEST_PRESS_ENTITY, "press", NULL, 51u, g_now_ms, 5000u, &slot);
+    CHECK(status == APP_CONTROL_ERR_UNSUPPORTED,
+          "'press' returned %s, expected unsupported from the codec",
+          app_control_status_name(status));
+    CHECK(g_gatt.write_calls == 0, "a write was attempted for an action that cannot be encoded");
+    CHECK(app_ctl_ble_inflight_count(&g_ctl) == 0u, "a refused action left an operation queued");
+    CHECK(app_control_pending_count() == 0u, "a refused action left a pending control");
+    CHECK(app_control_observed_state(TEST_PRESS_ENTITY) == NULL,
+          "a refused action published a state");
+}
+
 /* ------------------------------------------------------------------ */
 /* notifications                                                       */
 /* ------------------------------------------------------------------ */
@@ -512,6 +719,10 @@ int main(void)
     test_registration_is_what_routes();
     test_a_send_does_not_move_the_state();
     test_a_disagreeing_report_does_not_confirm();
+    test_a_value_control_is_confirmed_by_its_own_value();
+    test_a_value_is_confirmed_by_what_was_written();
+    test_a_scaled_recipe_expects_the_scaled_value();
+    test_an_action_the_codec_cannot_encode_is_refused();
     test_a_control_with_no_link_is_failed_not_sent();
     test_a_control_whose_write_fails_is_failed();
     test_an_unresolvable_handle_is_refused();

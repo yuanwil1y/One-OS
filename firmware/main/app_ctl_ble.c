@@ -10,6 +10,8 @@
 
 #include "app_ctl_ble.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "app_ble_gatt.h"
@@ -99,14 +101,47 @@ static bool ble_claims(void *ctx, const app_entity_binding_t *entity)
 }
 
 /*
- * The state the device must report for this control to count as confirmed.
+ * A scalar, parsed exactly as the codec parses it.
  *
- * Derived from the REQUEST, never from the device: a confirmation that read the
- * current device state and compared it with itself would confirm everything.
- * Returns false for actions whose success is not a state this firmware can name,
- * and such a control is reported as SENT-but-unconfirmable rather than guessed.
+ * The codec uses strtof on the whole string and rejects anything left over, so a value
+ * like "12abc" must not become 12 here either: if the codec refused the control, there
+ * is no expected state, and if it accepted the value this must agree on what it was.
  */
-static bool expected_state_for(const char *action, char *out, size_t out_size)
+static bool parse_scalar(const char *text, float *out)
+{
+    char *end = NULL;
+    float parsed;
+
+    if (text == NULL || out == NULL || text[0] == '\0') {
+        return false;
+    }
+    parsed = strtof(text, &end);
+    if (end == text || (end != NULL && *end != '\0')) {
+        return false;
+    }
+    *out = parsed;
+    return true;
+}
+
+/*
+ * Derive the state a successful control should make the device report.
+ *
+ * Derived from the REQUEST and never from the device: a confirmation that read the
+ * device's current state and compared it with itself would confirm everything.
+ *
+ * Four cases, and the difference between them is a product decision, so it is written
+ * out rather than collapsed into a default:
+ *
+ *   - turn_on / turn_off -> the boolean names app_control publishes;
+ *   - set_value / set_text -> the value the user asked for, which a device that has
+ *     obeyed will report back. Refusing to accept that would time out a control that
+ *     worked, which is the failure mode this case exists to prevent;
+ *   - anything else -> no derivable state. The control is still sent, but it can never
+ *     be confirmed, and it ends at its deadline with `ble_confirm_unavailable` rather
+ *     than with a claim that the device failed.
+ */
+static bool expected_state_for(const char *action, const char *value, uint32_t scale, char *out,
+                               size_t out_size)
 {
     if (action == NULL || out == NULL || out_size == 0u) {
         return false;
@@ -118,6 +153,39 @@ static bool expected_state_for(const char *action, char *out, size_t out_size)
     if (strcmp(action, "turn_off") == 0) {
         (void)app_strlcpy(out, HA_STATE_OFF, out_size);
         return true;
+    }
+    if (strcmp(action, "set_value") == 0 || strcmp(action, "set_text") == 0) {
+        if (value == NULL || value[0] == '\0') {
+            /* A value action with no value is the loop's business to refuse before it
+             * reaches a backend; there is nothing to expect here. */
+            return false;
+        }
+        if (strcmp(action, "set_text") == 0) {
+            (void)app_strlcpy(out, value, out_size);
+            return true;
+        }
+        /*
+         * set_value: the SCALED value is what the codec puts on the wire and therefore
+         * what the device reports back. Comparing against the unscaled request would
+         * never match for a recipe with a scale, so a working control would be reported
+         * as a device that never answered - the silent false negative this whole case
+         * exists to prevent. scale 0 means 1, exactly as the codec treats it.
+         */
+        {
+            float number;
+
+            if (!parse_scalar(value, &number)) {
+                return false;
+            }
+            number *= (scale == 0u) ? 1.0f : (float)scale;
+            if (number < 0.0f) {
+                /* A negative register is outside what the codec can express; it refuses
+                 * such a control, so there is nothing to expect. */
+                return false;
+            }
+            (void)snprintf(out, out_size, "%ld", (long)number);
+            return true;
+        }
     }
     return false;
 }
@@ -231,7 +299,7 @@ static app_control_backend_result_t ble_send(void *ctx, const char *entity_id, c
     (void)app_strlcpy(op->action, action, sizeof(op->action));
     op->value_handle = handle;
     op->deadline_ms = 0u; /* set by tick, once the write has actually happened */
-    op->has_expect_state = expected_state_for(action, op->expect_state,
+    op->has_expect_state = expected_state_for(action, value, entity->scale, op->expect_state,
                                               sizeof(op->expect_state));
 
     /*
@@ -366,7 +434,16 @@ bool app_ctl_ble_tick(app_ctl_ble_t *self)
             if ((int32_t)(now - op->deadline_ms) >= 0) {
                 op->state = APP_CTL_BLE_FAILED;
                 self->deadlines_expired++;
-                (void)app_control_fail(op->request_id, "ble_confirm_timeout");
+                /*
+                 * Two different endings, and the caller must be able to tell them
+                 * apart. An action whose target state this firmware cannot name was
+                 * never going to be confirmed whatever the device did, so reporting
+                 * "the device did not answer" would blame the device for the
+                 * firmware's own limit.
+                 */
+                (void)app_control_fail(op->request_id, op->has_expect_state
+                                                          ? "ble_confirm_timeout"
+                                                          : "ble_confirm_unavailable");
                 op->in_use = false;
                 changed = true;
             }
