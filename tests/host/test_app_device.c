@@ -885,10 +885,12 @@ static void test_drivability_follows_the_controllers(void)
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
           "BLE_GATT is not drivable although app_ctl_ble exists");
 
-    /* The rest have no controller yet, and saying otherwise would offer controls that
-     * cannot work. */
-    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
-          "ESPHOME_API is drivable without a controller");
+    /* ESPHome: the controller landed in B7 as well, with its own host group. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
+          "ESPHOME_API is not drivable although app_ctl_esphome exists");
+
+    /* Zigbee and Matter have no controller yet, and saying otherwise would offer
+     * controls that cannot work. */
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE),
           "ZIGBEE_ATTRIBUTE is drivable without a controller");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_COMMAND),

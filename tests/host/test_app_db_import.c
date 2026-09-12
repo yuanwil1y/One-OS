@@ -756,7 +756,7 @@ static void test_successful_import_replaces_and_reports_version(void)
     CHECK(g_imp.phase == APP_DB_IMPORT_DONE, "phase is done");
     CHECK(version == 20260911u, "the fixture's content version was read, got %lu",
           (unsigned long)version);
-    CHECK(g_imp.profile_count == 5u, "and its profile count, got %lu",
+    CHECK(g_imp.profile_count == 6u, "and its profile count, got %lu",
           (unsigned long)g_imp.profile_count);
 
     /* The path now holds the uploaded bytes, byte for byte. */

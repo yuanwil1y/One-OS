@@ -209,9 +209,15 @@ static void test_valid_fixture(void)
           info.content_version);
     /* A reproducible build records timestamp 0 rather than a wall clock. */
     CHECK(info.build_timestamp == 0u, "build timestamp must be 0 for reproducibility");
-    CHECK(info.profile_count == 5u, "profile count, got %u", info.profile_count);
-    CHECK(info.recipe_count == 7u, "recipe count, got %u", info.recipe_count);
-    CHECK(info.provenance_count == 5u, "provenance count, got %u",
+    /*
+     * 1006 is the ESPHome profile added when the firmware gained an ESPHome match key:
+     * it carries one ESPHOME_API recipe (its only writable one) and one passive sensor,
+     * which is why the profile, recipe and provenance counts each moved by one
+     * (profile and provenance by one, recipes by two).
+     */
+    CHECK(info.profile_count == 6u, "profile count, got %u", info.profile_count);
+    CHECK(info.recipe_count == 9u, "recipe count, got %u", info.recipe_count);
+    CHECK(info.provenance_count == 6u, "provenance count, got %u",
           info.provenance_count);
     CHECK(info.index_bucket_count == 16u, "bucket count, got %u",
           info.index_bucket_count);

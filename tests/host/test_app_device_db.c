@@ -429,7 +429,7 @@ static void test_open_fixture_is_ready(void)
           app_db_state_name(g_db.state));
     CHECK(g_db.open, "handle reports open");
     CHECK(app_db_state_is_usable(g_db.state), "ready is usable");
-    CHECK(g_db.profile_count == 5u, "fixture has 5 profiles, got %lu",
+    CHECK(g_db.profile_count == 6u, "fixture has 6 profiles, got %lu",
           (unsigned long)g_db.profile_count);
     CHECK(g_db.content_version == 20260911u, "fixture content version, got %lu",
           (unsigned long)g_db.content_version);
@@ -711,6 +711,77 @@ static void test_match_unknown(void)
         CHECK(!result.matched, "unknown service is not a match");
     }
 
+    /*
+     * An ESPHome node, matched on its mDNS INSTANCE name.
+     *
+     * An ESPHome node is only ever seen as a LAN device, and the name that identifies
+     * one is the mDNS instance: the service type `_esphome._tcp` is identical for every
+     * node in range, so keying on it would resolve one profile for all of them. Profile
+     * 1006 in the fixture is keyed on `example-node-1` and carries an `ESPHOME_API`
+     * recipe, which is also the only writable ESPHome recipe in the corpus.
+     */
+    {
+        app_scan_lan_t lan = make_lan("_esphome._tcp.local");
+
+        (void)app_strlcpy(lan.instance, "example-node-1", sizeof(lan.instance));
+
+
+        memset(&result, 0, sizeof(result));
+        CHECK(app_device_db_match(&g_db, APP_SOURCE_LAN, DEVICE_DB_PROTO_ESPHOME, NULL,
+                                  0u, NULL, NULL, &lan, &result),
+              "the ESPHome match attempt ran");
+        CHECK(result.matched, "an ESPHome node was not matched on its instance name");
+        CHECK(result.profile_id == 1006u, "matched profile %u, expected 1006",
+              (unsigned)result.profile_id);
+
+        /* And the recipe really carries a write target, so the device is controllable
+         * once the runtime registers the backend. */
+        {
+            bool found_write = false;
+
+            for (uint8_t i = 0u; i < result.recipe_count; ++i) {
+                if (result.recipes[i].backend == DEVICE_DB_BACKEND_ESPHOME_API &&
+                    result.recipes[i].write_target_id != DEVICE_DB_NO_INDEX) {
+                    found_write = true;
+                }
+            }
+            CHECK(found_write, "the ESPHome profile has no writable recipe");
+        }
+
+        /* A DIFFERENT instance name is a different node: the match must not be a
+         * blanket "any ESPHome service type" hit. */
+        (void)app_strlcpy(lan.instance, "some-other-node", sizeof(lan.instance));
+        memset(&result, 0, sizeof(result));
+        CHECK(app_device_db_match(&g_db, APP_SOURCE_LAN, DEVICE_DB_PROTO_ESPHOME, NULL,
+                                  0u, NULL, NULL, &lan, &result),
+              "the second ESPHome match attempt ran");
+        CHECK(!result.matched,
+              "a different node name matched the same profile as example-node-1");
+    }
+
+    /*
+     * An ESPHome sighting with no mDNS instance name.
+     *
+     * An ESPHome node is only ever seen as a LAN device, and the name that identifies
+     * one is the mDNS INSTANCE - the service type `_esphome._tcp` is the same for every
+     * node in range. So a sighting from SSDP or Nmap, which carries no instance, must
+     * yield nothing matchable and leave the device generic. Before the ESPHome key case
+     * existed this was also the behaviour, for the wrong reason: nothing matched at all.
+     */
+    {
+        app_scan_lan_t lan = make_lan("_esphome._tcp.local");
+
+        memset(&result, 0, sizeof(result));
+        CHECK(app_device_db_match(&g_db, APP_SOURCE_LAN, DEVICE_DB_PROTO_ESPHOME, NULL,
+                                  0u, NULL, NULL, &lan, &result),
+              "an espHome match attempt ran");
+        CHECK(!result.matched,
+              "a sighting with no instance name must not match an ESPHome profile");
+        /* And the service TYPE alone is never the key, whatever it is. */
+        CHECK(strcmp(lan.service, "_esphome._tcp.local") == 0,
+              "the fixture carries the service type: %s", lan.service);
+    }
+
     /* A BLE observation with nothing matchable at all: also not an error. */
     {
         app_scan_ble_t bare = make_ble(0u, 0u, 0u, 0u);
@@ -809,12 +880,12 @@ static void test_drivability_gates_a_write_target_per_backend(void)
           "zigbee_command must not be drivable yet");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE),
           "zigbee_attribute must not be drivable yet");
-    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
-          "esphome_api must not be drivable yet");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_COMMAND),
           "matter_command must not be drivable yet");
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
           "ble_gatt is drivable now that app_ctl_ble exists");
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
+          "esphome_api is drivable now that app_ctl_esphome exists");
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_PASSIVE_VALUE),
           "a passive read is drivable");
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_NONE), "no backend is drivable");

@@ -606,7 +606,10 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 而状态上报正是控制确认所依赖的东西。今天这个窗口里通常没有状态流量（节点先发实体再发 Done），
 所以它是潜伏的而不是当前的故障——正因为如此才要写进文档。
 
-### B7 未决：ESPHome 设备**根本无法被识别**（本轮核实，这是一个架构缺口而不是遗漏）
+### B7 未决（**已在本轮解决**，保留证据链）：ESPHome 设备曾**根本无法被识别**
+
+下面是发现问题时的核实记录。**它已经修好了**——见上一节"B7 已决"。保留这一段是因为它记录了
+**为什么**当时没有草率动手，以及证据在哪。
 
 上一节按"链路上缺什么"列了三件事。继续往下核实时发现一个更根本的问题：**ESPHome 设备不会匹配到
 任何 profile**，因为识别路径里根本没有 ESPHome 这一格。逐条证据：
@@ -624,18 +627,43 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 节点都相同**，所以它不可能区分出某一台节点的 profile——就算给 `build_key()` 加上一个
 `DEVICE_DB_PROTO_ESPHOME` 分支也解决不了，因为那时手里根本没有节点名。
 
-**所以这是一次产品取舍，不是写代码**：ESPHome 的识别要靠哪一种身份？
+**所以当时把它记成一次产品取舍**。事后重新核对发现：**它不是取舍**——`device-db-format.md`
+已经把 `ESPHOME_NODE_NAME` 定为安全的跨协议身份，而 mDNS instance 就是那个名字，所以按已有约定
+实现即可（见上一节）。当时之所以停下，是因为还没有把"格式里已经定义了这个身份"与"扫描能不能
+拿到它"这两件事对上。
 
-1. **mDNS instance 名**（`_esphome._tcp` 的 instance，通常就是节点名）——扫描时就有，不需要连上
-   节点就能匹配；但 instance 名与 API 的自报名是否**总是**一致，需要拿一台真实节点核对，
-   而且这条身份属于 `mdns_txt_identifier`/"按文档保证"那一档（见 `device_db_format.md` 的合并安全表）。
-2. **API hello 的自报名**（`esphome_node_name`，格式里已经为它留了值 4）——权威，但**必须先连上**
-   节点才能拿到，于是"先用什么去决定连哪台节点"变成一个鸡生蛋问题，而连一台未知节点需要它的
-   加密密钥。
-3. **不自动识别**：ESPHome 设备保持"扫描到的未知设备"，控制只在用户显式指定后开放。
+### B7 已决：ESPHome 设备的识别身份 = mDNS instance 名（本轮完成）
 
-这三条互斥，且**都会改变识别契约**，所以不能由我替产品决定。我**没有**implement 其中任何一条：
-在语料里加一条 ESPHOME 配方而不解决身份来源，只会产出一条永远匹配不上的记录。
+上一节把这件事记成"需要产品决定"。重新核对后**它不是产品取舍，而是工程决定**——因为仓库自己的
+约定已经回答了它：`device-db-format.md` 把 `ESPHOME_NODE_NAME` 列为**安全的**跨协议身份
+（kind 4），而扫描能给出一台 LAN 设备的唯一节点名，就是 mDNS 的 **instance**
+（`example-node-1._esphome._tcp.local` 里的 `example-node-1`）。服务类型
+`_esphome._tcp` 对所有 ESPHome 节点都一样，**不可能**用于区分。
+
+所以按已有约定实现了它，改动四处：
+
+| 改动 | 位置 |
+|---|---|
+| `app_scan_lan_t` 增加 `instance` 字段（既有 struct 里只有 hostname 与 service type，没有这一项） | `include/app_scan.h` |
+| mDNS 阶段填入 instance | `app_scan_native.c::lan_note_mdns()` |
+| **`build_key()` 增加 `DEVICE_DB_PROTO_ESPHOME` 分支**，键 = instance 名（规范化后） | `app_device_db.c` |
+| 合并 LAN 观测时保留 instance（与 hostname/service 同一规则，且不能覆盖已有值） | `app_scan.c::app_scan_ingest_lan()` |
+
+配套：`app_backend_is_drivable()` 的 `ESPHOME_API` 翻为 **true**（控制器已有 109 项 host 检查），
+语料里新增 **profile 1006**（instance 键 `examplenode1`、`esphome_node_name` 身份、一条
+`ESPHOME_API` 可写配方 + 一条被动 sensor）。
+
+**写这个 fixture 时抓到一个真错误**，值得记下：我最初把指纹键写成 `example-node-1`，
+结果**匹配不上**。原因不是代码，是键的形态——指纹哈希是在**规范化之后**的字节上算的
+（小写、去掉 `-` 和 `:`，见 `nbdb.py::normalize_key` 与 C 的 `canonicalize()`），
+所以语料里必须写 `examplenode1`。我直接解码了生成出来的 `.nbdb` 才看清：存储的
+`key_hash` 是 `0xc3ae0728`（对应 `examplenode1`），而我按字面 `example-node-1` 重算得到
+`0xb2b7f0d2`。**这条规则没有写在格式文档里**，只在两个实现里，所以现在写进了 fixture 的
+`_note`。附带发现：Zigbee 那条 fixture 键（`example|plug-zb-2`）也有同样的字面/规范化差异，
+但应用不用 Zigbee 哨兵做匹配，所以它今天无害——不改，但如果 B8 接上 Zigbee 匹配就会变成真问题。
+
+*未验证*：真机。instance 名是否**总是**等于 API 自报的节点名，需要一台真实节点核对；
+这正是清单 §5c.11 的判据。
 
 ### B7 未完成项（明确列出）
 

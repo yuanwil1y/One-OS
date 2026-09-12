@@ -759,6 +759,27 @@ static size_t build_key(uint8_t protocol, const app_scan_wifi_t *wifi,
         }
         return canonicalize(lan->service, strlen(lan->service), out, out_size);
 
+    case DEVICE_DB_PROTO_ESPHOME:
+        /*
+         * The mDNS service INSTANCE, which for ESPHome is the node name.
+         *
+         * This is the one node name a scan can see, and it is what a profile's
+         * `esphome_node_name` identity rule (device-db-format.md, kind 4, a SAFE
+         * cross-protocol identity) names. It has to be the instance rather than
+         * `lan->service`: the service type is `_esphome._tcp` for every ESPHome node in
+         * range, so keying on it would match one profile for all of them - or, as
+         * before this case existed, match nothing at all.
+         *
+         * A sighting with no instance name (SSDP, Nmap) yields nothing matchable, which
+         * is not an error: the device stays generic until an mDNS sighting supplies the
+         * name. That is the same rule the other protocols follow - no key, no profile,
+         * and never a guess.
+         */
+        if (lan == NULL || lan->instance[0] == '\0') {
+            return 0u;
+        }
+        return canonicalize(lan->instance, strlen(lan->instance), out, out_size);
+
     default:
         return 0u;
     }

@@ -927,6 +927,11 @@ static void lan_note_mdns(app_scan_evidence_t *ev, const ha_mdns_service_t *serv
         obs.service_count = 1u;
         (void)app_strlcpy(obs.hostname, service->hostname, sizeof(obs.hostname));
         (void)app_strlcpy(obs.service, service->service_type, sizeof(obs.service));
+        /* The INSTANCE, not the service type. `_esphome._tcp` is the same for every
+         * ESPHome node in range, so the type cannot identify one; the instance
+         * (`my-node._esphome._tcp.local`) is the node name a profile's
+         * esphome_node_name identity rule names. */
+        (void)app_strlcpy(obs.instance, service->instance, sizeof(obs.instance));
         obs.first_seen_ms = now_ms();
         obs.last_seen_ms = obs.first_seen_ms;
         (void)app_scan_ingest_lan(ev, &obs);

@@ -69,6 +69,19 @@ bool app_backend_is_drivable(uint8_t backend)
          */
         return true;
     case DEVICE_DB_BACKEND_ESPHOME_API:
+        /*
+         * Drivable as of B7, on the same grounds as BLE_GATT: app_ctl_esphome is the
+         * controller and it has a host group (109 checks) that drives the REAL
+         * app_control loop, including the case ESPHome makes easy to get wrong - a
+         * state report arrives for an entity the node already had a value for, so
+         * confirming on "a report arrived" would mark a refused command as confirmed.
+         *
+         * What is NOT verified is the wire and the node: no ESPHome node has ever been
+         * contacted by this firmware, and an ESPHome device also cannot yet be matched
+         * to a profile at all unless the corpus keys it on the mDNS instance name (see
+         * the ledger). Neither changes what this switch means.
+         */
+        return true;
     case DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE:
     case DEVICE_DB_BACKEND_ZIGBEE_COMMAND:
     case DEVICE_DB_BACKEND_MATTER_ATTRIBUTE:
