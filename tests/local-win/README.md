@@ -16,28 +16,31 @@ address, and `SIGPIPE`).
 
 ## Status
 
-The shim itself works: the encrypted session was driven to completion on this
-machine, every handshake step printed and compared on both sides, and the three
-client defects it exposed were fixed.
+The shim is good enough to drive **one** connection end to end, and that is how
+the encrypted session was debugged: every handshake step printed and compared on
+both sides, which excluded the key schedule as the cause.
 
-`tools/local/run-local-win-test.ps1` **compiles and links cleanly**, and running
-it reproduces the failure in seconds. As of this commit it stalls in the
-plaintext phase before reaching the encrypted one: both threads end up blocked
-in `recv` (`fd=1 n=1` on one side, `fd=2 n=1` on the other), which is a
-difference between this loopback and real TCP that has not been identified yet.
-Set `WIN_SHIM_TRACE=1` to see it.
+`tools/local/run-local-win-test.ps1` compiles and links cleanly. Running it
+stalls, and the cause is now identified: **this loopback does not survive
+sequential connections.** `test_api_client.c` opens five of them, closing each
+listener before the next, and Windows reuses the freed descriptor number for the
+new listener while the previous thread still believes it owns that number. The
+trace shows exactly that — the plaintext phase's `fd=0`/`fd=2` are handed out
+again for the encrypted phase while the earlier thread is still reading.
 
-That stall does **not** block debugging the encrypted session: a standalone
-harness that runs both ends in one process over the same shim
-(`local_enc.c`, described in `docs/handover-ledger.md` §4d) reaches the
-handshake and reports the exact divergence.
+Fixing it means giving the loopback a per-connection handle rather than a flat
+descriptor table, which is more work than the remaining value justifies. The
+reduced harness (`local_enc.c`, one connection, two ends in one process) is what
+to use instead; it is described in `docs/handover-ledger.md` §4d.
 
 ## What it is and is not
 
-- It is a debugging aid. It lets the encrypted session be driven, printed and
-  fixed on this machine in seconds instead of through CI.
-- It is **not** a TCP stack: IPv4 loopback only, no DNS beyond the numeric host,
-  no half-close, no flow control beyond sleeping when a buffer is full.
+- It is a debugging aid for **a single connection**. It lets the encrypted
+  session be driven, printed and compared on this machine in seconds instead of
+  through CI.
+- It is **not** a TCP stack, and it is not a test runner: IPv4 loopback only, no
+  DNS beyond the numeric host, no half-close, no flow control beyond sleeping,
+  and no correct reuse of descriptor numbers after `close`.
 - A test that passes here still has to pass in CI. `tests/host-test-groups.txt`
   and the shell runners remain authoritative.
 
