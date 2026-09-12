@@ -34,6 +34,13 @@ extern "C" {
 /* Wire constants of the ESPHome Native API noise transport. */
 #define ESPHOME_NOISE_PREAMBLE             0x01u
 #define ESPHOME_NOISE_HANDSHAKE_MSG_BYTES  48u /* 32-byte dh public + 16-byte tag */
+/* NOISE_HELLO, sent once before the handshake message: a peer that still
+ * accepts plaintext uses it to learn that this connection is encrypted. */
+static inline const uint8_t *esphome_noise_client_hello_marker(void)
+{
+    static const uint8_t marker[4] = { 0x00u, ESPHOME_NOISE_PREAMBLE, 0x00u, 0x00u };
+    return marker;
+}
 #define ESPHOME_NOISE_TAG_BYTES            NOISE_CRYPTO_AEAD_TAG_BYTES
 #define ESPHOME_NOISE_MAX_OVERHEAD_BYTES   (2u + 4u + ESPHOME_NOISE_TAG_BYTES)
 /* The pre-shared key is 32 bytes; the size has a name so the client can hold one. */

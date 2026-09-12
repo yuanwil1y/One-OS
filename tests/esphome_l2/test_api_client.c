@@ -40,7 +40,7 @@ for(unsigned i=0;i<32;i++)priv[i]=(uint8_t)(0x40u+i);
 memcpy(peer_psk,g_psk,32);
 if(g_noise_mode==1)peer_psk[0]^=0xffu;
 ntr_reset(&st,peer_psk,(const uint8_t*)ESPHOME_NOISE_PROLOGUE,priv,NULL);
-{uint8_t p4[4];if(!allr(fd,p4,4)){fprintf(stderr,"WIRE peer could not read 4 bytes (mode=%d)\n",g_noise_mode);fflush(stderr);close(fd);return NULL;}fprintf(stderr,"WIRE peer read %02x %02x %02x %02x (mode=%d)\n",p4[0],p4[1],p4[2],p4[3],g_noise_mode);fflush(stderr);if(p4[0]!=0x00||p4[1]!=0x01||p4[2]!=0x00||p4[3]!=0x00){close(fd);return NULL;}}
+assert(allr(fd,m1,4)&&m1[0]==0x00&&m1[1]==0x01&&m1[2]==0x00&&m1[3]==0x00);
 {uint8_t sh[3];assert(allr(fd,sh,3));assert(sh[0]==0x01&&(((unsigned)sh[1]<<8)|sh[2])==48u);}
 assert(allr(fd,m1,48));
 if(!ntr_handshake(&st,m1,m2)){/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
@@ -52,7 +52,8 @@ uint8_t junk[8]={0x01,0x00,0x10,1,2,3,4,5};
 for(int i=0;i<32;i++){(void)send(fd,junk,sizeof(junk),0);}
 close(fd);return NULL;}
 /* HelloRequest is the first encrypted frame. */
-if(!(allr(fd,fr,3)&&fr[0]==0x01)){fprintf(stderr,"WIRE peer: first frame marker=%02x\n",fr[0]);fflush(stderr);close(fd);return NULL;}n=((size_t)fr[1]<<8)|fr[2];if(n>sizeof(fr)||!allr(fd,fr,n)){fprintf(stderr,"WIRE peer: frame body %u bytes\n",(unsigned)n);fflush(stderr);close(fd);return NULL;}if(!(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==1&&n==0)){fprintf(stderr,"WIRE peer: first frame type=%u len=%u\n",(unsigned)t,(unsigned)n);fflush(stderr);close(fd);return NULL;}
+assert(allr(fd,fr,3)&&fr[0]==0x01);n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));
+assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==1&&n==0);
 esphome_pb_writer_t w;esphome_pb_writer_init(&w,pl,sizeof(pl));esphome_pb_put_varint(&w,1,1);esphome_pb_put_varint(&w,2,15);esphome_pb_put_string(&w,3,"ESPHome 2026.8.0",32);esphome_pb_put_string(&w,4,"noise-node",31);size_t fl=ntr_seal(&st,2,pl,w.len,fr,sizeof(fr));assert(fl&&allw(fd,fr,fl));
 /* DeviceInfoRequest / response. */
 assert(allr(fd,fr,3)&&fr[0]==0x01);n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==9);
