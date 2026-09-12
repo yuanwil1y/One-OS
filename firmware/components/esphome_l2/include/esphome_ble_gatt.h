@@ -43,7 +43,12 @@ typedef esp_err_t (*esphome_ble_gatt_radio_suspend_fn)(void *user, uintptr_t *re
 typedef void (*esphome_ble_gatt_radio_resume_fn)(void *user, uintptr_t restore_token);
 typedef void (*esphome_ble_gatt_notify_fn)(uint16_t value_handle,const uint8_t *data,size_t data_len,bool truncated,void *user);
 typedef struct { uint32_t connect_timeout_ms,operation_timeout_ms,disconnect_timeout_ms; esphome_ble_gatt_radio_suspend_fn radio_suspend; esphome_ble_gatt_radio_resume_fn radio_resume; void *radio_user; } esphome_ble_gatt_config_t;
-typedef union { max_align_t _align; uint8_t _opaque[ESPHOME_BLE_GATT_SESSION_BYTES]; } esphome_ble_gatt_session_t;
+/* _Alignas(max_align_t) rather than relying on the union's members: the session is
+ * cast to the implementation struct internally, so it must be aligned for the
+ * strictest member. Without it the alignment follows size_t, and a session placed
+ * after an odd multiple of 8 bytes - which is what an application struct embedding
+ * one of these after a 1784-byte member produces - is misaligned for the union. */
+typedef union { _Alignas(max_align_t) max_align_t _align; uint8_t _opaque[ESPHOME_BLE_GATT_SESSION_BYTES]; } esphome_ble_gatt_session_t;
 esp_err_t esphome_ble_gatt_init(esphome_ble_gatt_session_t*,const esphome_ble_gatt_config_t*);
 void esphome_ble_gatt_deinit(esphome_ble_gatt_session_t*);
 esp_err_t esphome_ble_gatt_connect(esphome_ble_gatt_session_t*,const esphome_ble_peer_t*);
