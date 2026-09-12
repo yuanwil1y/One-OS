@@ -832,9 +832,16 @@ static void test_hostile_ssid_is_not_injected(void)
 
 static void test_control_is_not_wired(void)
 {
-    /* Nothing in this layer may expose a writable entity: no protocol controller
-     * binding exists yet, so a control request must not be able to find a
-     * target here. */
+    /*
+     * This test's premise changed with B7, and it is kept because the premise is
+     * what it checks: a device whose corpus entry names no writable recipe must
+     * expose no control, whatever controllers exist.
+     *
+     * It is driven here by a Wi-Fi observation with no recogniser and no database, so
+     * no recipe can be applied at all. The BLE capability question - whether a
+     * recognised BLE recipe becomes a control now that app_ctl_ble exists - is the
+     * subject of test_a_recognised_ble_recipe_is_controllable() below.
+     */
     app_scan_evidence_t ev;
     const uint8_t bssid[6] = {0x60, 0, 0, 0, 0, 1};
     bool truncated = false;
@@ -858,6 +865,40 @@ static void test_control_is_not_wired(void)
                   "turn_on is not supported by %s", e->entity_id);
         }
     }
+}
+
+/*
+ * Which backends the drivability switch admits, and which it still refuses.
+ *
+ * This is the single place the firmware decides whether a corpus recipe for a given
+ * protocol may become a control, so it is worth pinning in both directions: a backend
+ * flipped too early offers an action that silently does nothing, and one left off
+ * after its controller landed leaves a working device uncontrollable.
+ */
+static void test_drivability_follows_the_controllers(void)
+{
+    /* Read-only paths need no controller. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_NONE), "NONE is drivable");
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_PASSIVE_VALUE), "PASSIVE_VALUE is drivable");
+
+    /* BLE GATT: the controller landed in B7, so a recipe for it may be driven. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
+          "BLE_GATT is not drivable although app_ctl_ble exists");
+
+    /* The rest have no controller yet, and saying otherwise would offer controls that
+     * cannot work. */
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
+          "ESPHOME_API is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE),
+          "ZIGBEE_ATTRIBUTE is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_COMMAND),
+          "ZIGBEE_COMMAND is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_ATTRIBUTE),
+          "MATTER_ATTRIBUTE is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_COMMAND),
+          "MATTER_COMMAND is drivable without a controller");
+    /* A value the format does not define. */
+    CHECK(!app_backend_is_drivable(0x7Fu), "an unknown backend is drivable");
 }
 
 /* ---------------- partial coverage and multi-source freshness ---------------- */
@@ -1194,6 +1235,7 @@ int main(void)
     test_entity_capacity_is_bounded();
     test_hostile_ssid_is_not_injected();
     test_control_is_not_wired();
+    test_drivability_follows_the_controllers();
 
     printf("app_device: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

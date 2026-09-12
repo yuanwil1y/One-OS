@@ -790,7 +790,7 @@ static void test_control_is_refused_while_the_backend_cannot_be_driven(void)
     store_release();
 }
 
-static void test_writable_zha_profile_is_still_refused_without_a_driver(void)
+static void test_drivability_gates_a_write_target_per_backend(void)
 {
     /*
      * Profile 1002 is `writable: true` with zigbee_command/zigbee_attribute
@@ -799,17 +799,22 @@ static void test_writable_zha_profile_is_still_refused_without_a_driver(void)
      * through the policy instead: app_backend_is_drivable() is the single switch
      * that decides whether the write target may survive, and it must be false
      * for every control backend this firmware does not implement.
+     *
+     * ble_gatt is no longer in that set: B7 landed a controller for it
+     * (app_ctl_ble + app_ctl_ble_gatt), so a BLE recipe's write target now
+     * survives - which is the point of the switch. test_app_device.c pins the
+     * whole table in both directions.
      */
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_COMMAND),
           "zigbee_command must not be drivable yet");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE),
           "zigbee_attribute must not be drivable yet");
-    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
-          "ble_gatt must not be drivable yet");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
           "esphome_api must not be drivable yet");
     CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_COMMAND),
           "matter_command must not be drivable yet");
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
+          "ble_gatt is drivable now that app_ctl_ble exists");
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_PASSIVE_VALUE),
           "a passive read is drivable");
     CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_NONE), "no backend is drivable");
@@ -1392,7 +1397,7 @@ int main(void)
     test_match_unknown();
     test_match_exact_key_does_not_merge_prefixed_profiles();
     test_control_is_refused_while_the_backend_cannot_be_driven();
-    test_writable_zha_profile_is_still_refused_without_a_driver();
+    test_drivability_gates_a_write_target_per_backend();
     test_decoder_and_quirk_selection_is_reported();
     test_decoder_availability_is_real();
 

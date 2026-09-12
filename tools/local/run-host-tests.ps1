@@ -440,6 +440,31 @@ function Invoke-Group {
                 "-I$(Join-Path $hc 'include')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')") @('-DAPP_DEVICE_TEST_HOOKS')
         }
+        'app_ctl_ble_gatt' {
+            # The firmware binding: which characteristic, of which device. A refusal
+            # is visible; a WRONG HANDLE is not - the write succeeds and the wrong
+            # attribute has been changed - so the refusals are what this group tests
+            # hardest.
+            Build-And-Run 'app_ctl_ble_gatt' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $m 'app_ctl_ble.c'),
+                (Join-Path $m 'app_ctl_ble_gatt.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_ble_gatt.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
+        }
         'app_acceptance' {
             Build-And-Run 'app_acceptance' @(
                 (Join-Path $hc 'ha_core.c'),
