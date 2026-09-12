@@ -421,10 +421,25 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 `app_control_pending_count()`、以及后端计数器。
 
 **仍未接线（这是 B7 剩下的最后一步）**：`app_backend_is_drivable()` 对
-`DEVICE_DB_BACKEND_BLE_GATT` 仍返回 false。在识别阶段写 `write_target_id` 的代码路径由它把门，
-所以**即使后端已经注册、测试全绿，实体仍然不会可写**，控制循环的正确答复仍是 `NO_BACKEND`。
-同一个改动里还必须更新 `test_control_is_not_wired`——它现在断言"没有任何实体可写"，那条断言
-的前提正是"还没有控制器"，而控制器刚刚有了。这两处必须一起改，否则两个决定互相矛盾。
+`DEVICE_DB_BACKEND_BLE_GATT` 仍返回 false。在识别阶段写 `write_target_id` 的代码路径由它把门
+（`app_device_db.c:608`、`app_device.c:1454`），所以**即使后端已经注册、测试全绿，实体仍然不会
+可写**，控制循环的正确答复仍是 `NO_BACKEND`。同一个改动里还必须更新
+`test_control_is_not_wired`——它现在断言"没有任何实体可写"，那条断言的前提正是"还没有控制器"，
+而控制器刚刚有了。这两处必须一起改，否则两个决定互相矛盾。
+
+**接线还差的那一个函数**（已在 `app_ctl_ble.h` 里写成契约，不是留白）：
+`app_ctl_ble_t::gatt.resolve`。固件版要做的事，用**已经存在**的字段就够了：
+
+1. `app_device_binding_t` 带 BLE 显示序地址，必须与**当前已打开 peer** 的地址相同，否则这条
+   控制是要发给另一台设备的，写下去就是驱动了错误的外设；
+2. `entity->write_target_id` 就是配方里的 GATT characteristic 索引
+   （`device_db_recipe_t::read_source_id` 是读侧的同一个索引），而
+   `app_ble_gatt_resolve()` 能把 characteristic 索引在**已发现的数据库**上换成 value handle——
+   所以这是查表，不是第二次发现；
+3. characteristic 必须可写，否则在这里拒绝，而不是到了射频才失败。
+
+这三条都能在 host 上验证（`app_ble_native` 的假 radio 已经枚举了一个 service + characteristic，
+`app_ble_gatt_resolve()` 也已有测试），所以剩下的接线是**可验证的一步**，而不是需要实板的猜测。
 
 ### B7 未完成项（明确列出）
 

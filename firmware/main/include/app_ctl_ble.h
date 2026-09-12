@@ -107,8 +107,27 @@ typedef struct {
         app_ble_status_t (*read)(void *ctx, uint16_t handle, uint8_t *out, size_t cap,
                                  size_t *out_len);
         bool (*is_ready)(void *ctx);
-        /* Resolve an entity's recipe to a value handle. Returns false when the
-         * device is not the open peer or the characteristic is unknown. */
+        /*
+         * Resolve an entity's recipe to the GATT value handle to write.
+         *
+         * The firmware supplies this and it is the last piece of the B7 chain that
+         * is not written yet. What it has to do, from the fields that already exist:
+         *
+         *   - the device binding carries the BLE display-order address, which must
+         *     equal the address of the OPEN peer, or this control is for a different
+         *     device than the session is connected to (and writing it would drive the
+         *     wrong peripheral);
+         *   - `entity->write_target_id` is the recipe's GATT characteristic index
+         *     (`device_db_recipe_t::read_source_id` is the same index for the read
+         *     side), and `app_ble_gatt_resolve()` turns a characteristic index into a
+         *     value handle over the session's discovered database - so the
+         *     subscription/write handle is a lookup, not a second discovery;
+         *   - the characteristic must be writable, or the control is refused here
+         *     rather than at the radio.
+         *
+         * It returns false rather than guessing: a wrong handle writes to whatever
+         * characteristic happens to sit at that offset.
+         */
         bool (*resolve)(void *ctx, const app_entity_binding_t *entity,
                         const app_device_binding_t *device, uint16_t *out_value_handle);
     } gatt;
