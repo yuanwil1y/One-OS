@@ -107,7 +107,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | **B5 SD 读取/识别/配方** | **完成** | **通过** | **通过** | **未做** | 已合并进 main；见 §4 |
 | **B6 配网与导入后端** | **完成（软件）** | **通过** | **通过** | **未做** | NVS 重启行为与浏览器交互未实测；见 §4b |
 | B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt、app_ble_native 两组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建，**固件适配器已完成并有 96 项 host 检查**；仍未做：control 后端、设备地址字节序约定、GATT 组件 deinit 的 use-after-free；见 §4d |
-| B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator；无应用通路 |
+| B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator。**核实结论**：§B8 列出的三个软件缺陷（interview 无回调超时、`retries=255` 回绕、失败 re-interview 清 snapshot）**已经修完并有 host 测试**（`zha_zigpy_l2` 组，11 个测试）；真正缺的是 `esp_zigbee` SDK 依赖与 coordinator/ZDO/ZCL 实机通路——本仓库**完全没有**该依赖（`grep esp_zb_` 无结果），且 802.15.4 验收需要真实设备 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
 | **B10 统一控制闭环** | **模块 + 已接线** | **通过** | **通过** | **未做** | 更正：本轮把 `APP_DIAG_CMD_CONTROL` 从直接返回 `NOT_IMPLEMENTED` 改为调用 `app_control_submit()`，控制循环第一次真正可达。仍无后端注册，因此正确答复是 `NO_BACKEND`；`app_runtime.c` 只能由目标构建编译，实板未验 |
 | **B11 无 GUI 整机验收** | **软件侧完成** | **通过** | **通过** | **未做** | 实板清单全部待办，见 `docs/hardware-acceptance.md` |
@@ -579,11 +579,15 @@ cd D:\OS\One-OS
 
 ### CI
 
-- **`a838205`（本分支，含本轮全部改动）：`build` success，`host-tests` 21 组通过、1 组失败**
-  —— [run 34688060996](https://github.com/yuanwil1y/One-OS/actions/runs/34688060996)。
+- **`55afe25`（本分支 HEAD，含本轮全部改动）：`build` success，`host-tests` 22 组通过、1 组失败**
+  —— [run 34688559014](https://github.com/yuanwil1y/One-OS/actions/runs/34688559014)。
   唯一失败组是本文件多处记录的 `esphome_l2` / `test_api_client` 加密路径（见 §4d）。
-  关键点：新增的 `app_ble_native` 在 CI 上 **PASS**，而 CI 用的是 **gcc**（比本机 clang 严格），
-  `test_noise` 也报 `noise tests: ok`（含新增的多帧传输向量）。
+  本轮新增/加强的三组在 CI 上全部 PASS：`app_ble_native`（96 checks）、
+  `app_cli_session`（100 checks）、`app_portal`（104 checks）。CI 用的是 **gcc**，
+  比本机 clang 严格，所以这一栏是独立证据而不是本机结果的重复。
+- 前一次运行 **`a838205`：`build` success、`host-tests` 21 组通过**
+  —— [run 34688060996](https://github.com/yuanwil1y/One-OS/actions/runs/34688060996)；
+  该次的 `test_noise` 报 `noise tests: ok`（含新增的多帧传输向量）。
 - **main `74facd3`（PR #20 合并提交）：`build` 与 `host-tests` 均 success**
   —— [run 34635862479](https://github.com/yuanwil1y/One-OS/actions/runs/34635862479)。
   这是 B5 完成的构建证据。
@@ -623,10 +627,25 @@ DATABASE 部署：把 `devices.nbdb` 放到卡的 `/nearby/db/` 目录（即
    流式上传到 `.part` + 校验 + 替换 + 断电恢复（FAT 上不能只靠 rename）。上传路径与 B5 的
    reader 必须协调：替换前关闭 reader。
 2. **B7**：ESPHome Noise 认证（当前只有明文切片，`ESP_ERR_NOT_SUPPORTED` 不能简单删掉）；
-   BLE GATT 生命周期交接。
+   BLE GATT 的 control 后端与**设备地址字节序约定**（适配器本轮已完成并 host 验证）。
 3. **B8**：Zigbee 原生 coordinator/ZDO/ZCL，复用已有 interview 超时与 last-known-good 修复。
+   核实：那三个软件修复**已经完成并测试**（见阶段表），真正缺的是 `esp_zigbee` SDK 依赖
+   （仓库中完全没有）与实机通路。
 4. **B9**：先修 Matter 构建（独立分支），再做 Thread 生命周期与 Matter 配网/订阅。
 5. **B10/B11**：统一控制闭环与整机验收；B11 需要实板才能完成资源测量部分。
+
+## 8b. 本轮（2026-09-12）实际完成的内容
+
+按提交顺序，全部已推送到 `feat/b6-http-portal`：
+
+| 提交 | 内容 | 证据等级 |
+|---|---|---|
+| `c90f898` | 传输帧序列由独立 Python 实现钉死（7 条帧），暴露并纠正了我对帧布局的错误假设 | host 通过 |
+| `c4cbc90` | 上述结论写入交接记录 | 文档 |
+| `0976d2b` | **B7 固件适配器** `app_ble_gatt_native.{c,h}` + 新组 `app_ble_native`；修掉适配器两个真缺陷（radio_user 指向错误上下文、读失败后残留 transport 垃圾）与 transport session 对齐 | host 通过（本机 + CI） |
+| `a838205` / `0e198e6` | 交接记录与硬件清单更新 | 文档 |
+| `df1e6c0` | **B11 无 GUI 验收会话**测试组 `app_cli_session`：把硬件清单里的命令行按真实 parse → decide → render 走一遍 | host 通过（本机 + CI） |
+| `55afe25` | **B6 修复**：已停止的 AP 不再在 `/api/status` 报出旧地址；新增按**值**检查密钥不泄漏的测试 | host 通过（本机 + CI） |
 
 ## 9. 需要人工提供的事项
 
