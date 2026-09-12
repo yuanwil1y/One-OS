@@ -66,8 +66,20 @@ static const uint8_t SEND_KEY[32] = {0xcd, 0x90, 0x67, 0xa8, 0x0a, 0x2b, 0x24, 0
 static const uint8_t RECV_KEY[32] = {0x4d, 0xa3, 0x8b, 0x2c, 0x27, 0x0c, 0x07, 0x77, 0xff, 0xd8, 0x5c, 0xce,
                                      0xeb, 0x36, 0xca, 0xce, 0x75, 0x7d, 0x54, 0xb0, 0x28, 0xe2, 0x4d, 0x58,
                                      0x2f, 0xec, 0x08, 0x1e, 0x84, 0xa2, 0x09, 0xc9};
-static const uint8_t TRANSPORT_FRAME[20] = {0xe1, 0xfd, 0x85, 0x0a, 0xdb, 0x90, 0xff, 0x9f, 0xd6, 0x67,
-                                            0xfa, 0x4f, 0x17, 0xdc, 0x34, 0xf8, 0xbe, 0xfa, 0xd4, 0xe8};
+static const uint8_t SENT_0[23] = {0x01, 0x00, 0x14, 0xe1, 0xfd, 0x85, 0x0a, 0xdb, 0x90, 0xff, 0x9f, 0xd6, 0x67, 0xfa, 0x4f,
+                                   0x17, 0xdc, 0x34, 0xf8, 0xbe, 0xfa, 0xd4, 0xe8};
+static const uint8_t SENT_1[23] = {0x01, 0x00, 0x14, 0xbc, 0x36, 0x12, 0x1f, 0xcb, 0x7e, 0x80, 0xec, 0x7b, 0xb3, 0x51, 0x18,
+                                   0xcf, 0x37, 0x65, 0x49, 0x1d, 0xd3, 0x26, 0x00};
+static const uint8_t SENT_2[23] = {0x01, 0x00, 0x14, 0xbb, 0x06, 0x59, 0x8d, 0x42, 0xfa, 0x13, 0xcc, 0xd0, 0x54, 0xe0, 0x8e,
+                                   0x09, 0x62, 0xf7, 0x23, 0xe1, 0x67, 0x66, 0x6a};
+static const uint8_t SENT_3[23] = {0x01, 0x00, 0x14, 0x31, 0xcc, 0x98, 0x48, 0x71, 0x96, 0xaa, 0x19, 0x27, 0xb8, 0xf3, 0x03,
+                                   0x98, 0x3f, 0x6a, 0x5e, 0x8b, 0x17, 0x33, 0xb5};
+static const uint8_t SENT_4[29] = {0x01, 0x00, 0x1a, 0xe7, 0x3a, 0x83, 0xed, 0x66, 0x0f, 0x45, 0x19, 0xf4, 0xe8, 0x09, 0x3d,
+                                   0x3e, 0x85, 0x4d, 0xbc, 0x30, 0xe1, 0x93, 0xcd, 0x0d, 0xe9, 0x0f, 0x41, 0x84, 0x45};
+static const uint8_t RECVD_0[25] = {0x01, 0x00, 0x16, 0x59, 0xd4, 0xce, 0x7f, 0x93, 0x8d, 0x2e, 0x4c, 0xc5, 0x2e, 0x91, 0xac,
+                                    0x4f, 0x3a, 0xb1, 0xf3, 0x56, 0xa8, 0x63, 0xef, 0x44, 0x99};
+static const uint8_t RECVD_1[29] = {0x01, 0x00, 0x1a, 0x16, 0x66, 0xff, 0xb8, 0xa9, 0x3c, 0x3e, 0x03, 0x74, 0x95, 0x72, 0x07,
+                                    0x11, 0x61, 0xa9, 0x11, 0x4f, 0x29, 0x23, 0x5d, 0x61, 0xe2, 0xb1, 0x7f, 0xbd, 0xc6};
 static const uint8_t SERVER_FRAME[20] = {0x59, 0xd0, 0xce, 0x7d, 0xd8, 0x47, 0xa9, 0x3e, 0x23, 0xd0,
                                          0x46, 0x83, 0x9d, 0xdd, 0x88, 0x71, 0xa0, 0xda, 0x07, 0x16};
 
@@ -149,7 +161,7 @@ static void test_pinned_handshake(void)
                                     &out_len) == ESPHOME_NOISE_OK,
               "transport encrypt failed");
         CHECK(out_len == 20u, "transport frame length is %u, expected 20", (unsigned)out_len);
-        CHECK(same(out, TRANSPORT_FRAME, sizeof(TRANSPORT_FRAME)),
+        CHECK(same(out, SENT_0 + 3u, sizeof(SENT_0) - 3u),
               "transport frame does not match the reference vector");
         CHECK(send.nonce == 1u, "send nonce did not advance exactly once");
     }
@@ -541,6 +553,142 @@ static void test_transport_cipherstate(void)
           "wiped cipherstate still encrypts");
 }
 
+/* Frames pinned by tools/reference/noise_transport_reference.py: the same
+ * transport keys as the reference handshake, driven through a short packet
+ * sequence. This is the only place the frame counter is checked against an
+ * independent implementation over more than one message, so a nonce that
+ * stops advancing, advances twice, or is built in the wrong byte order fails
+ * here rather than silently breaking interop on the second packet. */
+static void test_transport_frame_sequence(void)
+{
+    static const struct {
+        uint8_t type;
+        const uint8_t *payload;
+        size_t payload_len;
+    } sent_plain[] = {
+        {1u, NULL, 0u},
+        {9u, NULL, 0u},
+        {11u, NULL, 0u},
+        {20u, NULL, 0u},
+        {33u, (const uint8_t *)"\x11\x11\x11\x11\x08\x00", 6u},
+    };
+    static const struct {
+        const uint8_t *frame;
+        size_t frame_len;
+    } sent_frames[] = {
+        {SENT_0, sizeof(SENT_0)},
+        {SENT_1, sizeof(SENT_1)},
+        {SENT_2, sizeof(SENT_2)},
+        {SENT_3, sizeof(SENT_3)},
+        {SENT_4, sizeof(SENT_4)},
+    };
+    static const struct {
+        const uint8_t *frame;
+        size_t frame_len;
+        uint8_t type;
+        const uint8_t *payload;
+        size_t payload_len;
+    } recvd_frames[] = {
+        {RECVD_0, sizeof(RECVD_0), 2u, (const uint8_t *)"\x0a\x00", 2u},
+        {RECVD_1, sizeof(RECVD_1), 26u, (const uint8_t *)"\x11\x11\x11\x11\x08\x01", 6u},
+    };
+
+    esphome_noise_cipherstate_t send, recv;
+    /* Sized for the largest ciphertext in the sequence (3 + 4 + 6 + 16) and the
+     * largest plaintext it can decrypt (4 + 6), so a length mismatch can never
+     * be mistaken for a buffer that was too small. */
+    uint8_t frame[29];
+    uint8_t plain[10];
+    size_t frame_len = 0;
+    size_t plain_len = 0;
+    size_t i;
+
+    CHECK(sizeof(sent_plain) / sizeof(sent_plain[0]) == sizeof(sent_frames) / sizeof(sent_frames[0]),
+          "fixture tables disagree on the number of client packets");
+
+    CHECK(esphome_noise_cipherstate_init(&send, SEND_KEY) == ESPHOME_NOISE_OK, "send cipher init failed");
+    CHECK(esphome_noise_cipherstate_init(&recv, RECV_KEY) == ESPHOME_NOISE_OK, "recv cipher init failed");
+
+    for (i = 0u; i < sizeof(sent_plain) / sizeof(sent_plain[0]); i++) {
+        /* The plaintext is the ESPHome frame header (msg type, then payload
+         * length, both big-endian) followed by the body. The header is encrypted
+         * rather than authenticated as associated data, which is what keeps the
+         * total overhead at 3 + 4 + 16 bytes per frame. */
+        uint8_t pt[4u + 8u];
+        size_t pt_len = 4u + sent_plain[i].payload_len;
+        /* The pinned frames carry the 3-byte session prefix (0x01 plus the
+         * big-endian ciphertext length); esphome_noise_encrypt produces only
+         * the ciphertext, so the comparison starts past that prefix. */
+        size_t body_len = sent_frames[i].frame_len - 3u;
+
+        pt[0] = 0x00;
+        pt[1] = sent_plain[i].type;
+        pt[2] = (uint8_t)(sent_plain[i].payload_len >> 8);
+        pt[3] = (uint8_t)(sent_plain[i].payload_len & 0xffu);
+        if (sent_plain[i].payload_len != 0u) {
+            memcpy(pt + 4u, sent_plain[i].payload, sent_plain[i].payload_len);
+        }
+
+        CHECK(send.nonce == (uint64_t)i, "send nonce is %llu before packet %u",
+              (unsigned long long)send.nonce, (unsigned)i);
+
+        CHECK(esphome_noise_encrypt(&send, NULL, 0u, pt, pt_len, frame, sizeof(frame), &frame_len) ==
+                  ESPHOME_NOISE_OK,
+              "packet %u failed to encrypt", (unsigned)i);
+        CHECK(frame_len == body_len, "packet %u is %u bytes, expected %u",
+              (unsigned)i, (unsigned)frame_len, (unsigned)body_len);
+        CHECK(frame_len <= sizeof(frame) && same(frame, sent_frames[i].frame + 3u, body_len),
+              "packet %u does not match the reference bytes", (unsigned)i);
+        /* The prefix the session prepends must also agree, or a peer would
+         * drop the frame before it ever reached the AEAD. */
+        CHECK(sent_frames[i].frame[0] == 0x01u &&
+                  sent_frames[i].frame[1] == (uint8_t)(body_len >> 8) &&
+                  sent_frames[i].frame[2] == (uint8_t)(body_len & 0xffu),
+              "packet %u has a malformed session prefix", (unsigned)i);
+        CHECK(send.nonce == (uint64_t)i + 1u, "send nonce did not advance exactly once on packet %u",
+              (unsigned)i);
+    }
+
+    for (i = 0u; i < sizeof(recvd_frames) / sizeof(recvd_frames[0]); i++) {
+        const uint8_t *body = recvd_frames[i].frame + 3u;
+        size_t body_len = recvd_frames[i].frame_len - 3u;
+
+        CHECK(recv.nonce == (uint64_t)i, "recv nonce is %llu before frame %u",
+              (unsigned long long)recv.nonce, (unsigned)i);
+        CHECK(esphome_noise_decrypt(&recv, NULL, 0u, body, body_len, plain, sizeof(plain),
+                                    &plain_len) == ESPHOME_NOISE_OK,
+              "frame %u failed to decrypt", (unsigned)i);
+        CHECK(plain_len == 4u + recvd_frames[i].payload_len,
+              "frame %u decrypted to %u bytes, expected %u", (unsigned)i, (unsigned)plain_len,
+              (unsigned)(4u + recvd_frames[i].payload_len));
+        /* The decrypted header must agree with what the responder claims to
+         * have sent, which is what esphome_api's unwrap path relies on. */
+        CHECK(plain[0] == 0x00 && plain[1] == recvd_frames[i].type &&
+                  plain[2] == (uint8_t)(recvd_frames[i].payload_len >> 8) &&
+                  plain[3] == (uint8_t)(recvd_frames[i].payload_len & 0xffu),
+              "frame %u decrypted to a header reporting type %u length %u", (unsigned)i,
+              (unsigned)plain[1], (unsigned)(((uint16_t)plain[2] << 8) | plain[3]));
+        CHECK(plain_len - 4u <= sizeof(plain) &&
+                  same(plain + 4u, recvd_frames[i].payload, plain_len - 4u),
+              "frame %u decrypted to the wrong payload", (unsigned)i);
+        CHECK(recv.nonce == (uint64_t)i + 1u, "recv nonce did not advance exactly once on frame %u",
+              (unsigned)i);
+    }
+
+    /* The first client packet is the ESPHome client hello: the handshake
+     * marker (0x00 0x01 0x00 0x00) is sent before the framing starts, and this
+     * is the first framed packet after it. Its length is pinned so that a
+     * reader of these vectors can tell where the marker ends and the ciphertext
+     * begins without counting bytes by hand. */
+    CHECK(sent_frames[0].frame_len == 23u, "the first client frame is %u bytes, expected 23",
+          (unsigned)sent_frames[0].frame_len);
+    CHECK(sent_plain[0].type == 1u, "the first client packet is not HelloRequest");
+    CHECK(sent_plain[0].payload_len == 0u, "HelloRequest must have an empty body");
+
+    esphome_noise_cipherstate_wipe(&send);
+    esphome_noise_cipherstate_wipe(&recv);
+}
+
 static void test_struct_sizes(void)
 {
     /* The firmware session embeds these; an unexpected growth is a silent
@@ -564,6 +712,7 @@ int main(void)
     test_argument_and_state_errors();
     test_full_exchange_with_fresh_keys();
     test_transport_cipherstate();
+    test_transport_frame_sequence();
     test_struct_sizes();
 
     if (failures != 0) {
