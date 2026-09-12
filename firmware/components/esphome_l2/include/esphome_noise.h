@@ -36,6 +36,8 @@ extern "C" {
 #define ESPHOME_NOISE_HANDSHAKE_MSG_BYTES  48u /* 32-byte dh public + 16-byte tag */
 #define ESPHOME_NOISE_TAG_BYTES            NOISE_CRYPTO_AEAD_TAG_BYTES
 #define ESPHOME_NOISE_MAX_OVERHEAD_BYTES   (2u + 4u + ESPHOME_NOISE_TAG_BYTES)
+/* The pre-shared key is 32 bytes; the size has a name so the client can hold one. */
+#define ESPHOME_NOISE_PSK_BYTES             32u
 /* "NoiseAPIInit", 12 bytes, no terminator. */
 #define ESPHOME_NOISE_PROLOGUE             "NoiseAPIInit"
 #define ESPHOME_NOISE_PROLOGUE_LEN         12u
