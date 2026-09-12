@@ -121,6 +121,26 @@ item 5b.1 still gates everything else.
 | 5b.8 | Cut the peripheral's power mid-operation | the operation reports `peer_gone`, not success | serial log |
 | 5b.9 | 100 × connect/discover/subscribe/notify/close against two peripherals, alternating | min free heap does not trend down; the second peripheral never appears pre-disconnected | serial log over 100 rounds |
 
+### 5b-bis. BLE control (the chain behind `app_ctl_ble`)
+
+The controller, its firmware binding and the drivability switch are all in place and
+host-tested (`app_ctl_ble` 85 checks, `app_ctl_ble_gatt` 53 checks). What no test can
+reach is a peripheral that actually answers, so these items are the ones that decide
+whether the chain is real. **Item 5b.1 still gates them.**
+
+| | Check | Expected | Evidence |
+|---|---|---|---|
+| 5b.10 | A peripheral exposing a **writable** characteristic, and a corpus recipe whose `write_target_id` names it | needed before anything below can run | — |
+| 5b.11 | `request <id> entities`, then `request <id> control <entity> turn_on` | the response names the state `pending` — **never** the requested state — and the write reaches the peripheral | serial log + peripheral log |
+| 5b.12 | Let the peripheral report the new value on a subscribed characteristic | the state moves to `confirmed` **only then**; before the report it is still pending | serial log |
+| 5b.13 | Send the opposite control and have the peripheral **refuse** (report the old value) | the control ends `failed` at its deadline and the previously confirmed state is restored — the requested value is never published | serial log |
+| 5b.14 | Send a control with the peripheral powered off or out of range | the control fails; it does **not** sit pending, and no write is attempted | serial log |
+| 5b.15 | Point a control at a device that is **not** the connected peer | refused, and the connected peripheral's characteristic is untouched | serial log |
+| 5b.16 | A recipe naming a **read-only** characteristic | refused before any write; the peripheral sees no ATT write | serial log + peripheral log |
+
+Item 5b.16 is the one worth doing first: a wrong handle does not fail, it writes
+successfully to the wrong attribute, and only the peripheral's own log shows it.
+
 ## 5c. ESPHome Native API (B7)
 
 Noise is implemented from the specification and verified against RFC vectors,

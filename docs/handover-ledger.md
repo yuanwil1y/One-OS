@@ -106,7 +106,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B4 DB 格式/工具 | 完成 | 通过 | 通过 | 不适用 | — |
 | **B5 SD 读取/识别/配方** | **完成** | **通过** | **通过** | **未做** | 已合并进 main；见 §4 |
 | **B6 配网与导入后端** | **完成（软件）** | **通过** | **通过** | **未做** | NVS 重启行为与浏览器交互未实测；见 §4b |
-| B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt、app_ble_native 两组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建，**固件适配器已完成并有 96 项 host 检查**；仍未做：control 后端、设备地址字节序约定、GATT 组件 deinit 的 use-after-free；见 §4d |
+| B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（app_ble_gatt / app_ble_addr / app_ble_native / app_ctl_ble / app_ctl_ble_gatt） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE 侧：会话、固件适配器、地址字节序、**控制器（app_ctl_ble）与固件绑定（app_ctl_ble_gatt）全部完成并有 host 组**，`BLE_GATT` 已翻为可驱动。**仍未做**：`app_runtime.c` 不注册任何 control 后端（`app_control_register_backend` 在 `firmware/main` 中没有任何调用者），所以运行时的正确答复仍是 `NO_BACKEND`；注册它需要决定 BLE 会话在启动时的初始化时机与射频归属（会话 init 在 NimBLE port 上跑，与 kismet 扫描阶段共享同一 radio）；实板从未验证。见 §4d |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator。**核实结论**：§B8 列出的三个软件缺陷（interview 无回调超时、`retries=255` 回绕、失败 re-interview 清 snapshot）**已经修完并有 host 测试**（`zha_zigpy_l2` 组，11 个测试）；真正缺的是 `esp_zigbee` SDK 依赖与 coordinator/ZDO/ZCL 实机通路——本仓库**完全没有**该依赖（`grep esp_zb_` 无结果），且 802.15.4 验收需要真实设备 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
 | **B10 统一控制闭环** | **模块 + 已接线** | **通过** | **通过** | **未做** | 更正：本轮把 `APP_DIAG_CMD_CONTROL` 从直接返回 `NOT_IMPLEMENTED` 改为调用 `app_control_submit()`，控制循环第一次真正可达。仍无后端注册，因此正确答复是 `NO_BACKEND`；`app_runtime.c` 只能由目标构建编译，实板未验 |
