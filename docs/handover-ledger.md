@@ -109,7 +109,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt 组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建；**固件适配器、control 后端、GATT 组件自身的 cancel 竞态仍未做**；见 §4d |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator；无应用通路 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
-| **B10 统一控制闭环** | **仅模块（未接线）** | **通过** | **通过** | **未做** | **更正**：`app_control.h` 在固件里没有任何调用者，`APP_DIAG_CMD_CONTROL` 仍直接返回 `NOT_IMPLEMENTED`，所以不是"一切都正确地被拒绝"，而是**根本没有提交**；见 §4c |
+| **B10 统一控制闭环** | **模块 + 已接线** | **通过** | **通过** | **未做** | 更正：本轮把 `APP_DIAG_CMD_CONTROL` 从直接返回 `NOT_IMPLEMENTED` 改为调用 `app_control_submit()`，控制循环第一次真正可达。仍无后端注册，因此正确答复是 `NO_BACKEND`；`app_runtime.c` 只能由目标构建编译，实板未验 |
 | **B11 无 GUI 整机验收** | **软件侧完成** | **通过** | **通过** | **未做** | 实板清单全部待办，见 `docs/hardware-acceptance.md` |
 
 ### B5 具体交付（本轮）
@@ -209,7 +209,20 @@ AMBIGUOUS_BACKEND，歧义绝不是猜测的许可）。
 `firmware/main/app_runtime.c` 的 `APP_DIAG_CMD_CONTROL` 分支仍直接返回 `APP_DIAG_ERR_NOT_IMPLEMENTED`
 （注释写的是"未实现的后端报 NOT_IMPLEMENTED"，但代码在到达任何后端之前就返回了）。
 因此现状是**根本没有请求进入控制循环**，而不是请求被拒绝。B10 的模块与 host 测试是真的，
-接线是缺的；接线列为 B10 未完项，不再是"完成（软件）"。
+接线是缺的。
+
+**本轮已修**（提交 `654863f`）：`APP_DIAG_CMD_CONTROL` 不再直接返回 `NOT_IMPLEMENTED`，
+而是调用 `app_control_submit()`，参数取自 diag 请求的 `target`/`action`/`value`/`request_id`/
+`timeout_ms`，时钟用运行时的 `now_ms()`。每个拒绝按原因映射到各自的 diag 错误
+（`NO_BACKEND`/`BUSY`/`OUT_OF_RANGE` 等不再折叠成一个通用失败），成功时返回的是
+"已受理"并带上控制循环给出的状态名，而不是声称状态已改变。
+
+**为什么这件事重要**：在此之前，B10 的 144 项 host 检查与全部准入规则**没有任何生产调用者**，
+也就是说根本没有被编译进镜像的代码去执行它们。现在这条链是真实可达的。
+
+**仍未做完**：没有任何后端注册，所以运行时的正确答复是 `NO_BACKEND`——这是设计状态，
+不是缺陷；要让 BLE 或 ESPHome 真正可写，还需要 B7 的固件适配器与控制后端。
+`app_runtime.c` 是 ESP-IDF-only，只能由目标构建编译（已通过）与实板验证，不能 host 测试。
 
 ### B11 软件验收
 
