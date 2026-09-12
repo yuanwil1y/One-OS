@@ -331,41 +331,31 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 
 ### B7 仍未完成的关键一项
 
-**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败**，但本轮把它的定位从
-"某一侧算错了"缩小到了**第 1 条消息校验之后的分歧**，并且**第一次拥有了本机可复现的调试回路**。
+**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败，但根因已经缩到一个字节。**
 
-本机调试回路（本轮建成，未提交，见下）：`D:\OS\.local-build\stubinc\` 里有一套自洽的
-socket 类型与实现（`sys/socket.h` 声明 + `win_loopback.c` 实现），配
-`D:\OS\.local-build\local_enc.c`（把测试的加密段独立出来、两端同进程）。构建命令：
+本机调试回路（本轮建成并提交，见 `tests/local-win/README.md`）：shim 本身可用，
+`D:\OS\.local-build\stubinc\` + `D:\OS\.local-build\local_enc.c` 让两端在同一进程内跑完整加密会话，
+**一次运行几秒出结果**，不再需要 CI 往返。
 
-```
-clang -std=gnu11 -O2 -I<t>/stubinc -I firmware/components/esphome_l2/include \
-      -I firmware/components/esphome_l2 -I tests/esphome_l2 \
-      <t>/stubinc/win_loopback.c \
-      firmware/components/esphome_l2/{esphome_api,esphome_api_codec,esphome_noise,esphome_noise_crypto}.c \
-      tests/esphome_l2/noise_test_responder.c D:\OS\.local-build\local_enc.c -pthread -o le.exe
-```
-（`<t>` = `D:\OS\.local-build`；还需 `sys/time.h`、`unistd.h`、`fcntl.h` 三个 stub 头，
-已在同目录。）
+本轮用它逐层打印后的结论：
 
-**逐层打印后得到的确定结论**（两侧数值完全一致，因此这些都**已排除**）：
+| 检查点 | 结果 |
+|---|---|
+| prologue 后 `h`/`ck`、PSK 混入后 `ck`/`k`/`h`、`e` 混入后 `ck`/`k`/`h` | 两侧**完全一致** |
+| 第 1 条消息 AEAD（nonce/key/ad） | 两侧完全一致，peer 校验**通过** |
+| `tag` 混入后 `h` | 两侧完全一致 |
+| 第 2 条消息的 `nonce`、32 字节 `k`、32 字节 `h` | 两侧**逐字节一致** |
+| initiator 重新计算第 2 条消息的 tag | `2b 34 32 09 … 7a 09` |
+| peer 实际产生并发送的 tag | `2b 34 32 09 … 87 b4` |
+| initiator **收到**的 tag | `2b 34 32 09 … 7a 3e` |
 
-| 步骤 | initiator | responder |
-|---|---|---|
-| `MixHash(prologue)` 后 | `ck=f0b8 h=4040` | `ck=f0b8 h=4040` |
-| `MixKeyAndHash(psk)` 后 | `ck=e233 k=b1a5 h=e85e` | `ck=e233 k=b1a5 h=e85e` |
-| `MixHash/MixKey(e.public_key)` 后 | `ck=b355 k=c1c0 h=95f5` | `ck=b355 k=c1c0 h=95f5` |
-| 第 1 条消息 AEAD 校验 | （发送方）`k=c1c04d1d h=95f52181 nonce=0` | 校验通过，同一组值 |
-| `MixHash(tag)` 后 | `ck=b355 k=c1c0 h=c2d3` | `ck=b355 k=c1c0 h=c2d3` |
+**所以分歧是：第 2 条消息（共 51 字节）在 initiator 收到的拷贝里，最后一个字节与
+peer 发送的不一致**——不是密钥、不是 nonce、不是 AD、不是长度，而是传输路径上一个字节。
+AEAD 因此校验失败（`read_message=4`），这正是整条用例失败的根因。
 
-**未解释的一点**：responder 在算完 `e, ee` 之后得到 `ck=8167 k=8029 h=88f2`，
-而 initiator 在读第 2 条消息时**报 AEAD 校验失败**（`read_message=4`）。
-两侧在第 1 条消息校验点上完全同步，所以分歧只可能出现在第 2 条消息的 `e/ee` 处理
-或 AEAD 调用本身——这是下一步唯一要看的地方，而且现在**在本机一次运行就能看到**。
-
-**教训（本轮付了约 20 次 CI 往返）**：这类对称协议必须在同一进程内并排打印每一步，
-不要在 CI 上二分。本机此前没有 POSIX socket，这件事做不了，所以先花时间建了这个回路，
-现在它是继续推进这条用例的前提。
+下一步只需回答一个问题：51 字节里那一个字节在哪里被改写。
+优先怀疑本机 shim 的 `send`/`recv`（它不是真实 TCP），其次是 peer 侧 `m2` 的写入顺序；
+在真实 TCP 上重现同一条打印即可区分两者。
 
 
 ## 5. 本轮修掉的四个边界问题
