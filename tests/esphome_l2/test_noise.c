@@ -16,6 +16,10 @@
 
 #include "esphome_noise.h"
 #include "esphome_noise_crypto.h"
+/* The shared responder that test_api_client also uses. It is a second implementation of
+ * the same state machine, so putting it against the firmware's initiator here is a
+ * cross-implementation check rather than a self-consistency one. */
+#include "noise_test_responder.h"
 
 static int failures;
 
@@ -689,6 +693,129 @@ static void test_transport_frame_sequence(void)
     esphome_noise_cipherstate_wipe(&recv);
 }
 
+/* ------------------------------------------------------------------ */
+/* the two implementations, against each other, on a non-pinned input   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * An ephemeral private key, so nothing in this test can pass by matching a fixture that
+ * both implementations were written against.
+ */
+static const uint8_t PAIR_CLIENT_ENTROPY[32] = {
+    0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
+    0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0};
+static const uint8_t PAIR_SERVER_ENTROPY[32] = {
+    0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+    0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40};
+static const uint8_t PAIR_PSK[32] = {
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
+
+static void pair_client_entropy(void *user, uint8_t *out, size_t len)
+{
+    (void)user;
+    memcpy(out, PAIR_CLIENT_ENTROPY, len);
+}
+
+/*
+ * The firmware's initiator against the repository's spec responder, in one process, on
+ * an input neither was written against.
+ *
+ * Why this test exists, and what it covers that the others cannot:
+ *
+ *   - test_pinned_handshake checks the initiator against bytes an independent Python
+ *     implementation produced. Strong, but it is a FIXED input: two implementations can
+ *     agree on a fixture and still disagree in general.
+ *   - test_full_exchange_with_fresh_keys drives the responder with freshly generated
+ *     keys, but only through the assertions written here.
+ *   - test_api_client is the only test that puts the two against each other over a real
+ *     socket - and it is the one that has been failing, on a two-byte divergence in
+ *     message 2, for several rounds. It cannot be compiled on Windows (no POSIX socket
+ *     headers) and its local port does not survive the five sequential connections it
+ *     makes, so the failure has never been reproducible off CI.
+ *
+ * This closes that gap WITHOUT sockets: the same two implementations, the same
+ * handshake, one process, no transport. It asserts the four things that have to hold
+ * between two independent implementations - the responder accepts the initiator's
+ * message 1, the initiator accepts the responder's message 2, the transport keys cross,
+ * and the handshake hashes agree - and it does so on an input that is not a fixture.
+ *
+ * What it does NOT cover: the framing on a real stream, and the socket path. Those stay
+ * with test_api_client on CI.
+ */
+static void test_the_two_implementations_agree(void)
+{
+    esphome_noise_handshake_t initiator;
+    ntr_state_t responder;
+    uint8_t msg1[ESPHOME_NOISE_HANDSHAKE_MSG_BYTES];
+    uint8_t msg2[ESPHOME_NOISE_HANDSHAKE_MSG_BYTES];
+    esphome_noise_cipherstate_t i_send, i_recv;
+    uint8_t r_send[32], r_recv[32];
+    uint8_t i_hh[32], r_hh[32];
+    size_t msg_len = 0u;
+
+    ntr_reset(&responder, PAIR_PSK, PROLOGUE, PAIR_SERVER_ENTROPY, NULL);
+
+    CHECK(esphome_noise_initiator_init(&initiator, PAIR_PSK, sizeof(PAIR_PSK), PROLOGUE,
+                                       sizeof(PROLOGUE), pair_client_entropy, NULL) ==
+              ESPHOME_NOISE_OK,
+          "the initiator refused the inputs");
+
+    CHECK(esphome_noise_write_message(&initiator, msg1, sizeof(msg1), &msg_len) ==
+              ESPHOME_NOISE_OK,
+          "the initiator could not write message 1");
+    CHECK(msg_len == sizeof(msg1), "message 1 is %u bytes", (unsigned)msg_len);
+
+    /* The responder verifies the initiator's tag: this is where a wrong PSK, prologue or
+     * key schedule shows up as a rejection rather than as a later mismatch. */
+    CHECK(ntr_handshake(&responder, msg1, msg2),
+          "the responder rejected the initiator's message 1");
+
+    /* And the initiator verifies the responder's. A two-byte divergence in this tag is
+     * exactly what test_api_client reports, so this assertion is the one that would
+     * catch it here instead. */
+    CHECK(esphome_noise_read_message(&initiator, msg2, sizeof(msg2)) == ESPHOME_NOISE_OK,
+          "the initiator rejected the responder's message 2");
+    CHECK(esphome_noise_step(&initiator) == ESPHOME_NOISE_STEP_DONE,
+          "the initiator's handshake did not complete");
+    CHECK(responder.ready, "the responder's handshake did not complete");
+
+    CHECK(esphome_noise_split(&initiator, &i_send, &i_recv) == ESPHOME_NOISE_OK,
+          "the initiator's split failed");
+    CHECK(ntr_split(&responder, r_send, r_recv), "the responder's split failed");
+
+    /* Keys cross, and they cross on the FULL 32 bytes: a comparison that only looked at
+     * the first 30 would have missed the divergence this test was written for. */
+    CHECK(same(i_send.key, r_recv, 32),
+          "the initiator's send key is not the responder's receive key");
+    CHECK(same(i_recv.key, r_send, 32),
+          "the initiator's receive key is not the responder's send key");
+    CHECK(!same(i_send.key, i_recv.key, 32),
+          "the two directions produced the same key, so the split is not crossing them");
+
+    CHECK(esphome_noise_handshake_hash(&initiator, i_hh) == ESPHOME_NOISE_OK,
+          "the initiator's handshake hash is unavailable");
+    memcpy(r_hh, responder.h, 32);
+    CHECK(same(i_hh, r_hh, 32), "the two implementations disagree on the handshake hash");
+}
+
+/*
+ * REMOVED ON PURPOSE: a transport-frame exchange between the two implementations.
+ *
+ * It was written, it did not work, and the reason is structural rather than a bug
+ * worth chasing. ntr_state_t keeps ONE nonce for both directions, so a frame it seals
+ * is not decryptable by a freshly split esphome_noise_cipherstate_t on the other side
+ * unless the nonce is set by hand - to a value that depends on how many frames had gone
+ * each way, which is a state the protocol never produces. Setting it by hand would make
+ * the test an assertion about the harness.
+ *
+ * What needs proving about frames is already pinned, and pinned better:
+ *   - test_transport_frame_sequence() checks seven whole frames, both directions, byte
+ *     for byte against the independent Python reference, including the nonce sequence;
+ *   - test_the_two_implementations_agree() checks the two state machines against each
+ *     other on a non-pinned input, which is the part a fixed fixture cannot cover.
+ */
+
 static void test_struct_sizes(void)
 {
     /* The firmware session embeds these; an unexpected growth is a silent
@@ -713,6 +840,7 @@ int main(void)
     test_full_exchange_with_fresh_keys();
     test_transport_cipherstate();
     test_transport_frame_sequence();
+    test_the_two_implementations_agree();
     test_struct_sizes();
 
     if (failures != 0) {
