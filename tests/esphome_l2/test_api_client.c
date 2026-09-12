@@ -43,7 +43,7 @@ ntr_reset(&st,peer_psk,(const uint8_t*)ESPHOME_NOISE_PROLOGUE,priv,NULL);
 assert(allr(fd,m1,4)&&m1[0]==0x00&&m1[1]==0x01&&m1[2]==0x00&&m1[3]==0x00);
 assert(allr(fd,m1,3));{unsigned len=((unsigned)m1[1]<<8)|m1[2];if(m1[0]!=0x01||len!=48u){fprintf(stderr,"noise hello header: %02x %02x %02x (want 01 00 30), closing\n",m1[0],m1[1],m1[2]);fflush(stderr);close(fd);return NULL;}}
 assert(allr(fd,m1,48));
-if(!ntr_handshake(&st,m1,m2)){/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
+if(!ntr_handshake(&st,m1,m2)){fprintf(stderr,"PEER rejected m1=%02x%02x%02x%02x..%02x%02x\n",m1[0],m1[1],m1[2],m1[3],m1[46],m1[47]);fflush(stderr);/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
 {uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;assert(allw(fd,hdr,3)&&allw(fd,m2,48));
 if(g_noise_mode==2){/* Handshake accepted, then frames that are not authentic
  * ciphertext: the client must drop them, never dispatch them, and eventually
