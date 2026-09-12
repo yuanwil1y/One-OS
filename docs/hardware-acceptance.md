@@ -160,17 +160,16 @@ still open (ledger §4d), so these items are the only way to settle it.
 
 ### 5c-bis. ESPHome control (the chain behind `app_ctl_esphome`)
 
-The controller is in place and host-tested (`app_ctl_esphome`, 109 checks), including
-the case ESPHome makes easy to get wrong: a state report arrives for an entity the node
-already had a value for, so confirming on "a report arrived" would mark a refused
-command as confirmed. Three things have to exist before any of this can run, and none
-of them is code: a node (5c.1), **a corpus recipe with backend `ESPHOME_API` whose
-`write_target_id` is the entity's key** (there is currently no such recipe in the
-fixture, so nothing is controllable), and the runtime registering the backend.
+The controller is in place and host-tested (`app_ctl_esphome`, 109 checks), and a node is now
+recognisable: profile 1006 in the fixture is keyed on the mDNS instance name and carries an
+`ESPHOME_API` switch recipe with a write target. What is left before any of this can run is a
+real node (5c.1), the runtime registering the backend, and **swapping the fixture's keys for
+the real ones** — an ESPHome entity key is an opaque u32 the node assigns, so it cannot be
+derived from the object id and has to be read off the node.
 
 | | Check | Expected | Evidence |
 |---|---|---|---|
-| 5c.10 | A corpus with an `ESPHOME_API` writable recipe naming a real entity key | needed before anything below can run | — |
+| 5c.10 | The real node's mDNS instance name and its switch entity's key, put into a corpus recipe | needed before anything below can run. The instance name is what the profile is keyed on; if it differs from the name the API reports, that is itself the finding for item 5c.2 | serial log + node log |
 | 5c.11 | `request <id> entities`, then `request <id> control <entity> turn_on` | `pending` — never the requested state — and the node's log shows the command arriving | serial log + node log |
 | 5c.12 | Let the node report the new state | the state moves to `confirmed` **only then** | serial log |
 | 5c.13 | Command the node and have it **not** change (e.g. an interlock refusing) | the report disagrees, so nothing is confirmed; the control ends `failed` at its deadline and the previous state is restored | serial log |
