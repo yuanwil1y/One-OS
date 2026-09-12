@@ -926,11 +926,17 @@ DATABASE 部署：把 `devices.nbdb` 放到卡的 `/nearby/db/` 目录（即
 
 ## 9. 需要人工提供的事项
 
-| 阻塞 | 需要的最小操作 |
-|---|---|
-| 全部实板验收（射频、SD、串口、资源测量） | 连接一块 Waveshare ESP32-C6-Touch-LCD-1.9，确认串口端口号 |
-| 真实 ESPHome 节点互操作（B7） | 一台可访问的 ESPHome 设备 + 其 API 加密密钥 |
-| 真实 Zigbee 设备（B8） | 一个标准 Zigbee 灯具/开关 |
-| 真实 Thread 网络（B9） | 一个 Thread Border Router 或 dataset |
-| 生产 `devices.nbdb` | 真实设备库文件（或授权来源清单），用于验证索引桶预算 |
-| Matter 构建 | 若需构建 connectedhomeip，需确认可用的子模块/工具链获取方式与时间预算 |
+按"它能解锁什么"排序，而不是按阶段号：
+
+| 阻塞 | 需要的最小操作 | 解锁 |
+|---|---|---|
+| **一块 Waveshare ESP32-C6-Touch-LCD-1.9 + 串口端口号** | 连接并告知端口（`COM…`） | B11 全部实板项；**所有** RAM/heap/栈数字；BLE 射频归属决定（B7/B10 注册）；BLE 地址字节序的最终确认 |
+| **microSD 卡（FAT32，含 `/nearby/db/`）** | 插入一张卡 | 清单 0.2、3.x；真实库读取与上传 |
+| **一块可控 GATT 外设** | 第二块 ESP32 跑 `bleprph`，或 Linux 主机跑 BlueZ `btgatt-server` | B7 BLE 控制端到端（清单 5b.10–5b.16）——**这是最便宜的单点解锁**，也是唯一能证实"写错 handle 会静默成功"这件事的装置 |
+| **一台可访问的 ESPHome 节点 + 其 API 加密密钥** | 节点地址 + key | B7 ESPHome 端到端（清单 5c.x）；同时是那条 404/握手修复的最终判据 |
+| **一条 `ESPHOME_API` 可写配方** | 语料里加一条 recipe，`write_target_id` = 真实节点上的实体 key | 让 ESPHome 侧**有东西可控**——目前 fixture 里一条都没有 |
+| **一个标准 Zigbee 设备** | 任一 Zigbee 灯具/开关 | B8 的验收；同时是 `esp_zigbee` 依赖是否值得引入的判据 |
+| **一个 Thread Border Router 或 dataset** | 可用的 Thread 网络 | B9 Thread 侧 |
+| **Matter 的 pin 决定** | 在 CHIP 侧确认：`539342f` 里 `StatusIB` 的真实位置，或换一个包含它的 pin | B9 Matter 构建（见 §4e；本机无法查证，需要一次可访问 CHIP 检出的排查） |
+| **生产 `devices.nbdb`** | 真实设备库文件（或授权来源清单） | 索引桶预算的真实性；识别覆盖率 |
+
