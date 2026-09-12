@@ -108,7 +108,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | **B6 配网与导入后端** | **完成（软件）** | **通过** | **通过** | **未做** | NVS 重启行为与浏览器交互未实测；见 §4b |
 | B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（app_ble_gatt / app_ble_addr / app_ble_native / app_ctl_ble / app_ctl_ble_gatt / app_ctl_esphome） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证。**两侧控制链路（BLE 与 ESPHome）软件侧全部完成**：`app_ctl_ble` 143、`app_ctl_ble_gatt` 53、`app_ctl_esphome` 109 checks。**仍未做**：`app_runtime.c` 不注册任何 control 后端（→ 运行时答复仍是 `NO_BACKEND`），注册需要先定射频归属（见 §"B7 未决：BLE 射频归属"）；两侧都**从未对真实设备跑过**。见 §4d |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator。**核实结论**：§B8 列出的三个软件缺陷（interview 无回调超时、`retries=255` 回绕、失败 re-interview 清 snapshot）**已经修完并有 host 测试**（`zha_zigpy_l2` 组，11 个测试）；真正缺的是 `esp_zigbee` SDK 依赖与 coordinator/ZDO/ZCL 实机通路——本仓库**完全没有**该依赖（`grep esp_zb_` 无结果），且 802.15.4 验收需要真实设备 |
-| B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
+| B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修，**失败点已定位**：`matter_l2_direct_part1.inc:27` 引用 `app/StatusIB.h`，而该分支 pinned 的 connectedhomeip（`539342f`）里**没有这个文件**（见 §4e）；修它需要先定 pin 与头文件位置。Thread 生命周期未接应用 |
 | **B10 统一控制闭环** | **模块 + 已接线** | **通过（含 app_cli_session / app_ctl_ble / app_ctl_ble_gatt）** | **通过** | **未做** | `APP_DIAG_CMD_CONTROL` 调用 `app_control_submit()`，控制循环可达。**控制后端已存在两个 host 组**（`app_ctl_ble` 85、`app_ctl_ble_gatt` 53），`BLE_GATT` 已翻为可驱动。**仍未做**：运行时没有注册任何后端（`app_control_register_backend` 无调用者），所以正确答复仍是 `NO_BACKEND`；注册需要先决定 BLE 会话的启动时机与射频归属。`app_runtime.c` 只能由目标构建编译，实板未验 |
 | B11 无 GUI 整机验收 | 软件侧完成 | 通过（含 app_cli_session 100） | 通过 | 未做 | 实板清单全部待办，见 `docs/hardware-acceptance.md`；BLE 控制新增 5b.10–5b.16 七项 |
 
@@ -736,6 +736,27 @@ python tools/reference/noise_transport_reference.py
 .\tools\local\run-host-tests.ps1 -Group esphome_l2
 ```
 
+## 4e. B9：Matter 研究分支的构建失败已定位到具体事实（本轮核实）
+
+`research/matter-chip-tool-l2-api` 比 main 领先 50 个提交、落后 17 个。它的 CI 最近三次
+（最近 `d562569`，2026-09-09）都是 **`host-tests` success、`build` failure**。失败点已查到
+**具体一行**，并且其中一部分核实到了外部一手来源：
+
+1. **编译错误**：`.../components/matter_l2/matter_l2_direct_part1.inc:27:10: fatal error:
+   app/StatusIB.h: No such file or directory`，随后 `FAILED: .../matter_l2.cpp.obj`、构建停止。
+   即 ESP-IDF 侧 1801 个目标全部构建成功，**只有 matter_l2 自己**编不过。
+2. **一手核实**：该分支把 connectedhomeip 子模块钉在
+   `third_party/connectedhomeip` = `539342f32d5f4dc93761c2f9325afe29270068f1`
+   （`espressif/connectedhomeip.git`，见该分支 `.gitmodules`）。取
+   `src/app/StatusIB.h` 得到 GitHub raw **HTTP 404**——**该文件在这个 revision 上不存在**，
+   所以这不是 include 路径配置问题。
+3. **CI 如何取 CHIP**：`checkout_submodules.py --platform esp32 --shallow`，然后在
+   `esp-idf-ci-action` 里 `source scripts/activate.sh -p esp32` 再 `idf.py build`；另有一个
+   `tools/check_matter_l2_scope.py` 约束 matter_l2 不得调用其它 L2 家族或 `esp_matter`。
+
+**结论**：失败**不是**"构建工具链不可用"，而是 matter_l2 引用了一个在该 pinned CHIP 版本中
+不存在的头文件。修它需要先确定用哪个 pin 的 connectedhomeip、以及该版本里 `StatusIB` 的真实位置
+（本机没有 CHIP 检出、没有 idf.py，**无法**在本轮查证）。因此**没有**盲改研究分支。
 
 ## 5. 本轮修掉的四个边界问题
 
