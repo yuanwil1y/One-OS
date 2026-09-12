@@ -579,6 +579,37 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 而状态上报正是控制确认所依赖的东西。今天这个窗口里通常没有状态流量（节点先发实体再发 Done），
 所以它是潜伏的而不是当前的故障——正因为如此才要写进文档。
 
+### B7 未决：ESPHome 设备**根本无法被识别**（本轮核实，这是一个架构缺口而不是遗漏）
+
+上一节按"链路上缺什么"列了三件事。继续往下核实时发现一个更根本的问题：**ESPHome 设备不会匹配到
+任何 profile**，因为识别路径里根本没有 ESPHome 这一格。逐条证据：
+
+| 环节 | 事实 | 位置 |
+|---|---|---|
+| 语料 | **没有任何 ESPHOME 后端配方**：5 个 fixture profile 的后端分别是 `passive_value`×4、`zigbee_*`、`none` | `tools/device_db/profiles/fixture_profiles.json` |
+| 格式能力 | `esphome` 是合法的 fingerprint protocol（值 7），`esphome_node_name` 是合法 identity kind（值 4） | `tools/device_db/nbdb.py:59`、`:85` |
+| **匹配键** | **`build_key()` 没有 ESPHome 分支**——只有 `BLE`/`WIFI`/`MDNS`/`LAN` 四个 case，其余走 `default: return 0u`。返回 0 表示"这条观察里没有任何可匹配的东西"，于是 profile 永远不会被解析 | `firmware/main/app_device_db.c` 的 `build_key()`，switch 在 `case DEVICE_DB_PROTO_MDNS/LAN` 之后直接 `default` |
+| 匹配入口 | `app_device_db_match()` 只被调用三次：BLE、WIFI、以及 **LAN 走 `DEVICE_DB_PROTO_MDNS`**。没有任何调用传入 `DEVICE_DB_PROTO_ESPHOME` | `app_device_db.c:1124`、`:1137`、`:1150` |
+| 身份来源 | `esphome_node_name` 是节点自报的名字，只有 API 的 hello 响应里有；应用里**没有任何地方调用** `esphome_api_probe()`/`esphome_api_entities()` | `grep esphome_api_` 在 `firmware/main/*.c` 中无结果 |
+
+**为什么这在计算上是必然的**：ESPHome 设备在扫描里**只能**以 LAN/mDNS 设备的形式出现，而 LAN 设备的
+匹配键是 `lan->service`，也就是服务类型字符串（`_esphome._tcp`）。**同一个服务类型下所有 ESPHome
+节点都相同**，所以它不可能区分出某一台节点的 profile——就算给 `build_key()` 加上一个
+`DEVICE_DB_PROTO_ESPHOME` 分支也解决不了，因为那时手里根本没有节点名。
+
+**所以这是一次产品取舍，不是写代码**：ESPHome 的识别要靠哪一种身份？
+
+1. **mDNS instance 名**（`_esphome._tcp` 的 instance，通常就是节点名）——扫描时就有，不需要连上
+   节点就能匹配；但 instance 名与 API 的自报名是否**总是**一致，需要拿一台真实节点核对，
+   而且这条身份属于 `mdns_txt_identifier`/"按文档保证"那一档（见 `device_db_format.md` 的合并安全表）。
+2. **API hello 的自报名**（`esphome_node_name`，格式里已经为它留了值 4）——权威，但**必须先连上**
+   节点才能拿到，于是"先用什么去决定连哪台节点"变成一个鸡生蛋问题，而连一台未知节点需要它的
+   加密密钥。
+3. **不自动识别**：ESPHome 设备保持"扫描到的未知设备"，控制只在用户显式指定后开放。
+
+这三条互斥，且**都会改变识别契约**，所以不能由我替产品决定。我**没有**implement 其中任何一条：
+在语料里加一条 ESPHOME 配方而不解决身份来源，只会产出一条永远匹配不上的记录。
+
 ### B7 未完成项（明确列出）
 
 - ~~**固件适配器**~~：已完成，见 §"B7 已完成：固件适配器"。
@@ -934,7 +965,8 @@ DATABASE 部署：把 `devices.nbdb` 放到卡的 `/nearby/db/` 目录（即
 | **microSD 卡（FAT32，含 `/nearby/db/`）** | 插入一张卡 | 清单 0.2、3.x；真实库读取与上传 |
 | **一块可控 GATT 外设** | 第二块 ESP32 跑 `bleprph`，或 Linux 主机跑 BlueZ `btgatt-server` | B7 BLE 控制端到端（清单 5b.10–5b.16）——**这是最便宜的单点解锁**，也是唯一能证实"写错 handle 会静默成功"这件事的装置 |
 | **一台可访问的 ESPHome 节点 + 其 API 加密密钥** | 节点地址 + key | B7 ESPHome 端到端（清单 5c.x）；同时是那条 404/握手修复的最终判据 |
-| **一条 `ESPHOME_API` 可写配方** | 语料里加一条 recipe，`write_target_id` = 真实节点上的实体 key | 让 ESPHome 侧**有东西可控**——目前 fixture 里一条都没有 |
+| **一个决定：ESPHome 设备的识别身份用哪一种** | 从 §"ESPHome 设备根本无法被识别"的三个选项里选一个（mDNS instance 名 / API 自报名 / 不自动识别） | 让 ESPHome 设备**可能**被识别；这是"加一条 ESPHOME 配方"能起作用的前提 |
+| **一条 `ESPHOME_API` 可写配方** | 语料里加一条 recipe，`write_target_id` = 真实节点上的实体 key | 让 ESPHome 侧**有东西可控**——目前 fixture 里一条都没有。**注意**：这一步在"识别身份"那个决定之前是无效的，因为 ESPHome 设备压根匹配不到 profile |
 | **一个标准 Zigbee 设备** | 任一 Zigbee 灯具/开关 | B8 的验收；同时是 `esp_zigbee` 依赖是否值得引入的判据 |
 | **一个 Thread Border Router 或 dataset** | 可用的 Thread 网络 | B9 Thread 侧 |
 | **Matter 的 pin 决定** | 在 CHIP 侧确认：`539342f` 里 `StatusIB` 的真实位置，或换一个包含它的 pin | B9 Matter 构建（见 §4e；本机无法查证，需要一次可访问 CHIP 检出的排查） |
