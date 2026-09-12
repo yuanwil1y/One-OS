@@ -295,17 +295,49 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 - **实板互操作**：真实 ESPHome 节点 + API 加密密钥；一块可控 BLE 外设。见 §9 与
   `docs/hardware-acceptance.md`。
 
-### 本轮的编译期教训（第 4、5 次）
+### 本轮的编译期教训（第 4、5、6 次）
 
-前三次已在 §"编译期问题的教训"记录。本轮又两次：
+前三次已在 §"编译期问题的教训"记录。本轮又三次：
 
 4. `tests/esphome_l2/test_noise_crypto.c` 里一个不再被使用的 `ad` 数组被 CI 的 **gcc**
-   以 `-Werror=unused-but-set-variable` 拒绝，而本机 clang 不报这个诊断。两台编译器都要过。
+   以 `-Werror=unused-but-set-variable` 拒绝，而本机 clang 不报这个诊断。
 5. 同一个提交里 `esphome_api.c` 有两处**只有目标构建能发现**的错误：`impl_t` 从未加上
    `noise_client_hello()` 读取的 `noise_psk` 成员；`hardclose()` 在 `nwipe()` 定义之前调用它。
-   本机之所以没发现，是因为唯一编译 `esphome_api.c` 的 host 二进制需要 POSIX socket 头，
-   本机构建在 include 阶段就停下了——**这就是"18 组全绿但目标构建失败"的第 5 次重演**。
-   本地镜像现在把这次编译报成失败，而不是静默跳过。
+6. `scb_off`（`test_api_client.c`）定义了但从未被订阅——gcc 报 unused，clang 不报；
+   而当时的测试断言 `got_off==0` 因此是**空洞的**。修正为真正订阅该回调。
+
+第 5、6 次的共同点：**本机唯一能编译这些文件的 host 二进制需要 POSIX socket**，
+所以本机在 include 阶段就停下，错误只在 CI 暴露。这正是"18 组全绿但目标构建失败"的重演。
+为缩小这个缺口，本轮加了 `tests/esphome_l2/stubs/win/`（进程内 socket 回环）与
+`tools/local/build-win-shim-test.ps1`，它已经能驱动明文握手；但它尚未完整模拟 TCP 流控，
+在加密路径上会死锁，因此**没有接入 runner**。该测试仍只由 CI 在 Linux 上编译运行。
+
+### Noise 客户端在 CI 上被逐个找出的真实缺陷
+
+这些都不是推理出来的，而是靠"打印双方实际交换的字节"逐个定位的，且每个都是真 bug：
+
+1. `impl_t` 没有 `noise_psk` 成员，目标构建直接失败（第 5 条教训）。
+2. **PSK 从未被保存**：`esphome_api_init()` 只记下"调用者给了 PSK"这个布尔，从未复制密钥。
+   诊断输出 `NX enter max_frame=512 psk=0` 一行定案。现在密钥被复制进 session，
+   握手读副本（调用者的缓冲区因此不必活过 init），`deinit` 时擦除。
+3. **协议错误码是陈旧的**：加密会话失败时报告的是上一次明文连接留下的 `OVERSIZED`，
+   把一轮排查引向了错误的 bug。`noise_client_hello` 现在先清零 `protocol_error`。
+4. **客户端从不发送 NOISE_HELLO**：线上头四个字节是 `01 00 30 3e`（握手头 + 消息首字节），
+   而 `aioesphomeapi` 会先发 `00 01 00 00`。这四个字节不只是分帧——**仍然接受明文的 peer
+   靠它判断这条连接是加密的**。现已由 `esphome_noise_client_hello_marker()` 发出。
+5. **测试用的加密 peer 把 3 字节的握手头当 4 字节读**，吃掉了消息的第一个字节，
+   之后每一步都在错位的流上断言。已修正为 3 字节。
+6. 握手长度检查改为按协议实际携带的字节（`hs[2]`）进行，读与检查因此不可能不一致。
+
+### B7 仍未完成的关键一项
+
+**加密端到端用例（`tests/esphome_l2/test_api_client.c`）仍然失败**，且失败点在
+"客户端等待 server hello"这一步：客户端读到超时（`ESP_ERR_TIMEOUT`），而 peer 的记录显示它
+已经发出了握手头与 48 字节消息。上面 6 个缺陷修复后，失败点被推到了这里，但**尚未定位**。
+这是一处测试/驱动层面的问题，不是协议层问题：协议层由 `test_noise.c` 的钉死向量与
+RFC 向量覆盖，全部通过。**下一次接手应当先在本机把这条用例跑起来**
+（`tests/esphome_l2/stubs/win/` 已经能跑到这一步，见下），不要在 CI 上继续二分——
+本轮为此花了 12 次 CI 往返。
 
 
 ## 5. 本轮修掉的四个边界问题
