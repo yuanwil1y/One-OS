@@ -40,7 +40,7 @@ for(unsigned i=0;i<32;i++)priv[i]=(uint8_t)(0x40u+i);
 memcpy(peer_psk,g_psk,32);
 if(g_noise_mode==1)peer_psk[0]^=0xffu;
 ntr_reset(&st,peer_psk,(const uint8_t*)ESPHOME_NOISE_PROLOGUE,priv,NULL);
-assert(allr(fd,m1,4)&&m1[0]==0x00&&m1[1]==0x01&&m1[2]==0x00&&m1[3]==0x00);
+if(!allr(fd,m1,4)){fprintf(stderr,"PEER mode=%d no first four bytes\n",g_noise_mode);fflush(stderr);close(fd);return NULL;}if(m1[0]!=0x00||m1[1]!=0x01||m1[2]!=0x00||m1[3]!=0x00){fprintf(stderr,"PEER mode=%d first four = %02x %02x %02x %02x (want 00 01 00 00)\n",g_noise_mode,m1[0],m1[1],m1[2],m1[3]);fflush(stderr);close(fd);return NULL;}
 assert(allr(fd,m1,3));{unsigned len=((unsigned)m1[1]<<8)|m1[2];if(m1[0]!=0x01||len!=48u){fprintf(stderr,"noise hello header: %02x %02x %02x (want 01 00 30), closing\n",m1[0],m1[1],m1[2]);fflush(stderr);close(fd);return NULL;}}
 assert(allr(fd,m1,48));
 if(!ntr_handshake(&st,m1,m2)){fprintf(stderr,"PEER rejected m1=%02x%02x%02x%02x..%02x%02x\n",m1[0],m1[1],m1[2],m1[3],m1[46],m1[47]);fflush(stderr);/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
