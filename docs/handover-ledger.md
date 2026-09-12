@@ -359,6 +359,42 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 *未验证*：真机上射频是否接受这个顺序（硬件清单 5b.2 项）；`app_scan_native.c` 的改动
 是 target-only，本机无法编译，由 CI 目标构建覆盖。
 
+### B7 已完成：在途操作期间 deinit（本轮，commit 见 §8b）
+
+这是任务书第三节第 1 条（"会话销毁超时 / 资源归属"）在 BLE 侧的具体形态，而且
+**先复现、后修**：
+
+我按 `app_ble_gatt` 既有测试的写法，在 `tests/esphome_l2/test_gatt.c` 加了一个
+**在途 read 中调用 `deinit()`** 的 mock 分支（模拟 NimBLE 后端在 `deinit` 里删除完成
+信号量，而调用者仍阻塞在那个信号量上），然后：
+
+1. **先拿到崩溃**：ASan 报 `access-violation on unknown address 0x48`，栈是
+   `end()` ← `esphome_ble_gatt_read()`。原因：`deinit` 的 `memset(s,0,...)` 把
+   `i->backend` 清零之后，仍在途的调用者在 `end()` 里解引用它
+   （`b->connected(i->backend_ctx)`）。
+2. **修掉崩溃**后又暴露出**更糟的第二个问题**：这次 read **返回 0（成功）** 且
+   `*len == 0`——正是本文件记录过的 "cancel 造成假成功" 的同一类缺陷，只是路径换成
+   deinit。原因：`op_epoch` 虽然先自增，但紧随其后的 `memset` 把 `op_epoch_at_start`
+   也清零了，于是 `end()` 里的 `i->op_epoch != i->op_epoch_at_start` 变成 `0 != 0`，
+   判定为 "没有被放弃"。
+
+**修法**（`esphome_ble_gatt.c`）：
+
+- `deinit` 先把 backend 指针与 backend ctx **取到局部**（因为 `backend->deinit()` 会清掉
+  这块存储），做 disconnect / 清订阅 / 还 radio，然后**在调用 `backend->deinit()` 之前**
+  把 `i->backend` 置 NULL；
+- `end()` 先取 `b = i->backend` 并判 NULL：为 NULL 说明会话已被拆除，此时不去问后端
+  "链路还在吗"（那正是解引用 NULL），直接按被放弃上报；
+- `memset` 之后写入 `op_epoch_at_start = UINT32_MAX`，一个**不可能被任何操作持有的代次**，
+  让 `end()` 的比较必然失败。理论上要 42 亿次 deinit 才可能误判，而误判的方向是安全的
+  （报失败，而它确实失败了）。
+
+新测试断言：read 返回 `ESP_ERR_INVALID_STATE`（不是 0）、后端确实执行了这次 read、
+后端确实被 deinit 过（其计数器在调用返回时已被清零，这本身就是拆除发生过的证据）、
+以及被 wipe 的 session 上的后续操作被拒绝。
+
+*未验证*：真机上的并发时序。本机用 mock 复现的是同一状态机，不是同一条线程模型。
+
 ### B7 未完成项（明确列出）
 
 - ~~**固件适配器**~~：已完成，见 §"B7 已完成：固件适配器"。
@@ -370,10 +406,7 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
   (a) ~~cancel 与在途操作竞态时返回假成功~~ **已修**（commit `19562b5`）：
   `op_epoch`/`op_epoch_at_start` 已存在，`end()` 会把被放弃的操作改判为
   `ESP_ERR_INVALID_STATE`。本文件此前的记录是陈旧的。
-  (b) 操作在途时调用 `deinit()` 仍会破坏状态：`deinit` 增加 `op_epoch`、调用
-  `backend->deinit()`（NimBLE 后端在这里**删除信号量**）、然后 `memset` 整个 session，
-  而阻塞中的调用者仍然持有那个指针并会在返回前访问它。`op_epoch` 只能让调用者**报告**
-  "被放弃"，不能让它在 session 已被清零之后安全地完成收尾。见下方"下一项要做的事"。
+  (b) ~~操作在途时调用 `deinit()` 会破坏状态~~ **本轮已修**，见 §"B7 已完成：在途操作期间 deinit"。
 - **实体可写性**：`app_backend_is_drivable()` 是编译期开关且对所有控制后端返回 false，
   `BLE_GATT` 的写目标因此在识别阶段就被丢掉（`app_device_db.c` 只在 drivable 时保留
   `write_target_id`），`entity_upsert_recipe()` 还会丢掉 `read_source_id`，
