@@ -413,6 +413,37 @@ gcc 的 `-Werror=array-bounds` 先让构建失败，比较根本没发生（同�
 **我在记录与提交信息里两次把结论说过头**（先说"最后一个字节"，再说"只有 tag 的第 15 字节不同"），
 两次都被下一次运行推翻。上面这张表是当前**有打印支撑**的事实，不要再往上加推论。
 
+### 传输帧序列现已由独立实现钉死（本轮新增，本机已通过）
+
+在此之前**只有一条传输帧**（HelloRequest）被钉死；帧计数器、nonce 构造和 AEAD 只在
+"一条消息"的尺度上被外部实现检查过。第二条帧一旦错位，本地测试是看不出来的。
+
+新增 `tools/reference/noise_transport_reference.py`：用参考握手产生的传输密钥，按顺序加密
+客户端在握手后会发出的 5 个包（HelloRequest、DeviceInfoRequest、ListEntitiesRequest、
+SubscribeStatesRequest、SwitchCommand）与响应端发回的 2 个帧，打印全部 7 条。测试
+`tests/esphome_l2/test_noise.c::test_transport_frame_sequence()` 逐条比对，并断言每次调用
+**恰好**推进一次 nonce。
+
+写这个测试时暴露了一处**我自己的错误假设**，值得记下，因为它是协议层的硬事实：
+
+- ESPHome 加密帧的明文是 **`[msg_type:2 BE][payload_len:2 BE][payload]`**，
+  **associated data 为空**；
+- 3 字节的线上前缀（`0x01` + 大端密文长度）由会话层拼上，
+  `esphome_noise_encrypt()` 只产生密文；
+- 因此空 payload 的单帧长度是 **3 + 4 + 16 = 23 字节**。
+
+我第一版测试误以为 `msg_type` 是 associated data、明文只有 2 字节，于是报出
+"packet 0 is 16 bytes, expected 20"。修正后 5 条发送帧与 2 条接收帧与 Python 参考实现
+**逐字节一致**；`esphome_api.c` 的 `noise_build()`/`noise_unwrap()` 也正是这个布局
+（`pt[0..1]=type`、`pt[2..3]=len`、AD 为 NULL），两者互为佐证。
+
+可重复命令：
+
+```
+python tools/reference/noise_transport_reference.py
+.\tools\local\run-host-tests.ps1 -Group esphome_l2
+```
+
 
 ## 5. 本轮修掉的四个边界问题
 
