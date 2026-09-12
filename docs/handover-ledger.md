@@ -114,7 +114,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B5 SD 读取/识别/配方 | 完成 | 通过 | 通过 | 未做 | §3 全部：真卡挂载、`/nearby/db/devices.nbdb` 路径、缺卡/坏库/版本不符、读取期间换库、重复 enrichment 不产生重复实体 |
 | B6 配网与导入 | 完成 | 通过 | 通过 | 未做 | §4：NVS 重启后凭据恢复、APSTA 实测、浏览器交互、上传中断与断电恢复、替换失败保留旧库；HTTP transport 无自动测试 |
 | B7 BLE GATT | 软件完成 | 通过 | 通过 | 未做 | §5b 全 9 项 + §5b-bis 7 项；**运行时不注册后端**（见射频归属决定） |
-| B7 ESPHome | 软件完成 | 通过 | 通过 | 未做 | §5c 7 项 + §5c-bis 7 项；**识别身份已定并实现**（mDNS instance 名，见 §"B7 已决"），语料含 profile 1006；**仍未做**：运行时不注册后端、node 从未被连接过、`test_api_client` 的加密路径仍失败（§4d） |
+| B7 ESPHome | 软件完成 | 通过 | 通过 | 未做 | §5c 7 项 + §5c-bis 7 项；**识别身份已定、已实现、并已在识别入口真正调用**（mDNS instance 名，`app_device_db: 182 checks`），语料含 profile 1006；**仍未做**：运行时不注册后端、node 从未被连接过（没有网络任务做 probe/entities/subscribe/poll/command）、`test_api_client` 的加密路径仍失败（§4d） |
 | B8 Zigbee | **未开始** | 部分（已有 11 个测试覆盖超时/重试/last-good） | 通过 | — | `esp_zigbee` 依赖不存在；coordinator 生命周期、入网、interview、ZCL 读写/命令、报告、网络持久化**全部未实现**；`APP_STAGE_ZIGBEE` 固定返回 `zigbee_backend_unavailable` |
 | B9 OpenThread | 部分 | 通过 | 通过 | 未做 | Thread 生命周期、持久化、与射频交接未接应用 |
 | B9 Matter | **构建失败** | 通过 | 失败 | — | §4e：`app/StatusIB.h` 在该 pin 上不存在；需要 pin 决定 |
@@ -664,6 +664,30 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 
 *未验证*：真机。instance 名是否**总是**等于 API 自报的节点名，需要一台真实节点核对；
 这正是清单 §5c.11 的判据。
+
+### B7 修复：加了键却**没调用它**（本轮，commit `86b3a30`）
+
+上一轮给 `build_key()` 加了 `DEVICE_DB_PROTO_ESPHOME` 分支、也加了按 instance 命名的 profile，
+但**没有在识别入口调用它**。识别入口（`app_device_db.c` 的 recognizer）依次尝试 BLE、Wi-Fi、LAN，
+而 LAN 那一次用的是 `DEVICE_DB_PROTO_MDNS`——它按**服务类型**取键。于是 ESPHome 节点仍然只会被拿去
+和 `_esphome._tcp` 比对（这个服务类型对所有节点都一样），而存在的 profile 是按 instance 命名的。
+**结果是：新键分支的单元测试全绿，节点依然识别不了。**
+
+修法：LAN 分支**先**按 ESPHome 协议尝试，再回落到通用 mDNS。顺序在两个方向上都是要点：
+instance 比服务类型更具体，必须先赢；而先试 mDNS 会为**任何** ESPHome 节点解析出按服务类型的 profile，
+那正是 instance 键存在的意义所在。SSDP/Nmap 的观测没有 instance，取不到键，回落到"没有可匹配项"——
+这是正常结果而不是错误。
+
+**新测试强于上一轮那个**：`test_an_esphome_node_becomes_controllable()` 走的是整条路径
+（ingest → recognizer → table → materialise → binding），断言节点匹配到 profile 1006、
+instance 名在 ingest 后仍在、并且**至少一个实体是 writable 且 backend 为 `ESPHOME_API` 且带真实
+write target**。最后这条才让"可控"有意义：它只有在配方的 write target 熬过识别之后才可能成立，而那
+又要求后端可驱动。**上一轮的测试直接调 `app_device_db_match`，所以它能在节点依然无法被识别的情况下
+通过。**
+
+**教训（值得记）**：为一个新分支写单元测试，不等于验证了**分发会走到那个分支**。给某个协议/后端
+加一条代码路径时，必须同时验证"选择它的那个地方真的选了它"——这就是"18 组全绿但目标构建失败"的同一
+类错误，只是换到了识别层。
 
 ### B7 未完成项（明确列出）
 
