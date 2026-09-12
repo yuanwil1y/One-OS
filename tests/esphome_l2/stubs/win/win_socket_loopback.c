@@ -252,35 +252,37 @@ int shim_sock_close(int fd)
 
 long shim_recv(int fd, void *buf, size_t len, int flags)
 {
+    /* POSIX recv: return up to len bytes, block until at least one is
+     * available, return 0 once the peer has closed and the buffer is drained.
+     * Returning fewer bytes than were asked for is normal, so callers loop;
+     * what must not happen is returning 0 while bytes are still pending, which
+     * makes a caller treat a full buffer as a closed connection. */
     shim_sock_t *s = at(fd);
     (void)flags;
     if (s == NULL || buf == NULL) {
         errno = EBADF;
         return -1;
     }
-    {   /* A blocking read in the loopback harness can only mean the two sides
-         * disagree about the protocol. Hanging forever hides that, so it becomes
-         * a loud abort with the descriptor and the byte count. */
-        for (;;) {
+    for (;;) {
         if (s->head != s->tail) {
             size_t have = s->tail - s->head;
             size_t take = len < have ? len : have;
             memcpy(buf, s->buf + s->head, take);
             s->head += take;
             if (s->head == s->tail) {
-                s->head = s->tail = 0u;
+                s->head = s->tail = 0u; /* empty: both back to zero, the only
+                                         * state in which the buffer is refilled */
             }
             trace("recv", fd, (long)take);
             return (long)take;
         }
-            if (s->closed_by_peer) {
-                return 0; /* the peer closed */
-            }
-            Sleep(1);
+        if (s->closed_by_peer) {
+            trace("recv-eof", fd, 0);
+            return 0;
         }
+        Sleep(1);
     }
 }
-
 long shim_send(int fd, const void *buf, size_t len, int flags)
 {
     shim_sock_t *s = at(fd);
@@ -297,7 +299,7 @@ long shim_send(int fd, const void *buf, size_t len, int flags)
             return -1;
         }
         {
-            size_t free_bytes = SHIM_BUF_BYTES - p->tail;
+            size_t free_bytes = SHIM_BUF_BYTES - p->tail; /* tail is the write offset and the pending count: the buffer is only refilled from 0 */
             if (free_bytes != 0u) {
                 size_t take = len < free_bytes ? len : free_bytes;
                 memcpy(p->buf + p->tail, buf, take);
