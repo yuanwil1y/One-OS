@@ -158,6 +158,29 @@ still open (ledger §4d), so these items are the only way to settle it.
 | 5c.6 | Send a control, then change the state on the node itself | the command is accepted; observed state moves only from the node's report | serial log |
 | 5c.7 | Restart the node mid-session | the session reports the disconnect and reconnects; no duplicate entities appear | serial log |
 
+### 5c-bis. ESPHome control (the chain behind `app_ctl_esphome`)
+
+The controller is in place and host-tested (`app_ctl_esphome`, 109 checks), including
+the case ESPHome makes easy to get wrong: a state report arrives for an entity the node
+already had a value for, so confirming on "a report arrived" would mark a refused
+command as confirmed. Three things have to exist before any of this can run, and none
+of them is code: a node (5c.1), **a corpus recipe with backend `ESPHOME_API` whose
+`write_target_id` is the entity's key** (there is currently no such recipe in the
+fixture, so nothing is controllable), and the runtime registering the backend.
+
+| | Check | Expected | Evidence |
+|---|---|---|---|
+| 5c.10 | A corpus with an `ESPHOME_API` writable recipe naming a real entity key | needed before anything below can run | — |
+| 5c.11 | `request <id> entities`, then `request <id> control <entity> turn_on` | `pending` — never the requested state — and the node's log shows the command arriving | serial log + node log |
+| 5c.12 | Let the node report the new state | the state moves to `confirmed` **only then** | serial log |
+| 5c.13 | Command the node and have it **not** change (e.g. an interlock refusing) | the report disagrees, so nothing is confirmed; the control ends `failed` at its deadline and the previous state is restored | serial log |
+| 5c.14 | An entity whose state the node reports as `missing` | not treated as a value: the control does not confirm from an absence | serial log |
+| 5c.15 | Remove the entity from the node, then send a control for its key | refused; no command is sent | serial log |
+| 5c.16 | Kill the node's network mid-control | the control fails; it does not sit pending | serial log |
+
+Item 5c.14 is the one to do first: `missing` travelled through the same callback as a
+real value until it was pinned, and confirming from an absence is silent.
+
 ## 6. Resources
 
 | | Check | Expected | Evidence |

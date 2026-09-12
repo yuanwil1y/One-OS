@@ -554,6 +554,31 @@ characteristic。**拒绝是可见的**（控制失败并记录原因），**写
 
 至此 **B7 的软件链路（BLE + ESPHome 两侧）全部完成**，剩的只有射频与运行时注册。
 
+### B7 未决：ESPHome 控制链路的可达性（逐环核实）
+
+控制后端已经完成，但"运行时能否走到它"需要逐环核实。核实结果：
+
+| 环节 | 现状 | 结论 |
+|---|---|---|
+| 发现节点 | `lan_note_nmap()` 把 ESPHome 的知名端口 **6053** 放进探测端口表（`app_scan_native.c:1153`），开放即计为一个 service；`lan_note_mdns()` 记录 mDNS 服务类型 | **有**：设备会以 LAN 设备形式出现，带 IPv4 |
+| 连接地址 | `app_scan_lan_t` 有 `ipv4`，**没有** `port`；mDNS 记录的 `service->port` 没有被带进证据 | **够用**：ESPHome Native API 的端口是协议常量(6053)，仓库里已经如此对待；host 取证据里的 IPv4 |
+| 实体绑定 | 需要一条 `ESPHOME_API` 配方（`write_target_id` = ESPHome 实体 key） | **缺**：`tests/fixtures/device_db/devices_fixture.nbdb` 里**没有任何 ESPHOME_API 配方**，所以现在没有任何实体可以被控制 |
+| 控制器 | `app_ctl_esphome`（本轮） | **有** |
+| 登记后端 | `app_runtime.c` 不注册任何后端 | **缺**，且与 BLE 侧同一个射频归属问题（ESPHome 走 TCP，不需要 NimBLE，但仍需一个不阻塞 worker 的网络任务） |
+
+**因此要让 ESPHome 侧真正可控制，最小缺口是三件**（都不需要改架构）：
+
+1. 语料里加一条 `ESPHOME_API` 可写配方，key 指向真实节点上的实体；
+2. 一个网络任务承担 `probe/entities/subscribe/poll/command`——这些都是**阻塞 I/O**，绝不能跑在
+   应用 worker 上（`esphome_api_poll` 带 timeout，`esphome_api_entities` 会一直读到 Done）；
+3. 在 `app_runtime.c` 注册后端（与 BLE 侧一起做，见上一节）。
+
+**调用顺序有一个不易察觉的陷阱**，值得写下来：`esphome_api_entities()` 会自己读到
+`ListEntitiesDone`，在这之间到达的其它帧都会被它丢弃。所以正确的顺序是
+**先 `subscribe()` 再 `entities()`**：反过来的话，实体列表请求与 Done 之间到达的状态上报会被丢掉，
+而状态上报正是控制确认所依赖的东西。今天这个窗口里通常没有状态流量（节点先发实体再发 Done），
+所以它是潜伏的而不是当前的故障——正因为如此才要写进文档。
+
 ### B7 未完成项（明确列出）
 
 - ~~**固件适配器**~~：已完成，见 §"B7 已完成：固件适配器"。
