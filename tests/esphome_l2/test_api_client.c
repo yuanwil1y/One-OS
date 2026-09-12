@@ -44,7 +44,7 @@ ntr_reset(&st,peer_psk,(const uint8_t*)ESPHOME_NOISE_PROLOGUE,priv,NULL);
 {uint8_t sh[3];assert(allr(fd,sh,3));fprintf(stderr,"STEP2 hdr %02x%02x%02x (len=%u)\n",sh[0],sh[1],sh[2],(unsigned)(((unsigned)sh[1]<<8)|sh[2]));fflush(stderr);assert(sh[0]==0x01&&(((unsigned)sh[1]<<8)|sh[2])==48u);}
 assert(allr(fd,m1,48));fprintf(stderr,"STEP3 m1 %02x%02x..%02x%02x\n",m1[0],m1[1],m1[46],m1[47]);fflush(stderr);
 if(!ntr_handshake(&st,m1,m2)){fprintf(stderr,"STEP4 handshake rejected\n");fflush(stderr);/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
-{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;assert(allw(fd,hdr,3)&&allw(fd,m2,48));
+{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;assert(allw(fd,hdr,3));fprintf(stderr,"PEER sent hdr %02x%02x%02x\n",hdr[0],hdr[1],hdr[2]);fflush(stderr);assert(allw(fd,m2,48));fprintf(stderr,"PEER sent m2 %02x%02x..%02x%02x\n",m2[0],m2[1],m2[46],m2[47]);fflush(stderr);
 if(g_noise_mode==2){/* Handshake accepted, then frames that are not authentic
  * ciphertext: the client must drop them, never dispatch them, and eventually
  * disconnect rather than loop forever. */
