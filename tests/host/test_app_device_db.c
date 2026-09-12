@@ -1142,6 +1142,99 @@ static void test_closed_database_cannot_match(void)
 
 /* ---------------- enrichment and materialisation ---------------- */
 
+/*
+ * An ESPHome node becomes a CONTROLLABLE entity through the whole enrichment path.
+ *
+ * The match test above reaches the database directly. This one goes through the
+ * recognition entry point, the table and materialisation, because the ESPHome branch is
+ * chosen there: an ESPHome node is tried on its own protocol BEFORE the generic mDNS
+ * attempt, and adding the key case without adding that call would leave the profile
+ * unreachable while every unit test of the key still passed - which is exactly what
+ * happened on the first attempt at this change.
+ *
+ * It also pins the hazard the ordering exists for: the mDNS attempt keys on the service
+ * TYPE, which is `_esphome._tcp` for every ESPHome node in range, so trying it first
+ * would resolve one profile for all of them.
+ */
+static void test_an_esphome_node_becomes_controllable(void)
+{
+    app_scan_evidence_t ev;
+    app_recognition_table_t table;
+    app_recognizer_ref_t ref;
+    app_scan_lan_t lan = make_lan("_esphome._tcp.local");
+    const app_recognition_entry_t *entry;
+    char identity[HA_CORE_ID_LEN];
+    bool truncated = false;
+
+    store_use_fixture();
+    db_open_fixture();
+
+    (void)app_strlcpy(lan.instance, "example-node-1", sizeof(lan.instance));
+    lan.from_mdns = true;
+
+    app_device_table_reset();
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    CHECK(app_scan_ingest_lan(&ev, &lan), "the node was ingested as LAN evidence");
+    /* The merge must not lose the instance: it is what the profile is keyed on. */
+    CHECK(strcmp(ev.lan[0].instance, "example-node-1") == 0,
+          "the instance name survived ingestion, got '%s'", ev.lan[0].instance);
+
+    ref.ops = app_device_db_recognizer_ops();
+    ref.ctx = &g_db;
+
+    CHECK(app_recognition_enrich(&ev, &ref, &table) == 1u, "one observation recognised");
+    (void)app_device_identity_of_lan(&lan, identity, sizeof(identity));
+    entry = app_recognition_table_find(&table, identity);
+    CHECK(entry != NULL, "the node has a recognition entry");
+    if (entry != NULL) {
+        CHECK(entry->matched, "the ESPHome profile matched through the recognizer");
+        CHECK(entry->profile_id == 1006u, "profile 1006, got %lu",
+              (unsigned long)entry->profile_id);
+    }
+
+    /* Materialisation turns it into a binding whose switch is writable: that is what
+     * "controllable" means here, and it requires the recipe's write target to have
+     * survived, which in turn requires the backend to be drivable. */
+    {
+        app_recognizer_ref_t table_ref = app_recognition_table_recognizer(&table);
+        const app_device_binding_t *binding;
+
+        CHECK(app_device_materialize(&ev, &table_ref, &truncated) == 1u,
+              "the node materialised");
+        binding = app_device_find(identity);
+        CHECK(binding != NULL, "the node exists by its identity key");
+        if (binding != NULL) {
+            CHECK(binding->recognition == APP_RECOGNITION_MATCHED,
+                  "recognition state is matched, got %s",
+                  app_recognition_name(binding->recognition));
+        }
+
+        /* At least one entity of this device is writable and carries a backend. */
+        {
+            bool found_writable = false;
+
+            for (size_t i = 0u; i < app_entity_count(); ++i) {
+                const app_entity_binding_t *e = app_entity_at(i);
+
+                if (e != NULL && strcmp(e->device_id, identity) == 0 && e->writable) {
+                    found_writable = true;
+                    CHECK(e->backend == DEVICE_DB_BACKEND_ESPHOME_API,
+                          "a writable ESPHome entity reports backend 0x%02x",
+                          (unsigned)e->backend);
+                    CHECK(e->write_target_id != DEVICE_DB_NO_INDEX,
+                          "a writable entity has no write target");
+                }
+            }
+            CHECK(found_writable,
+                  "an ESPHome node matched a writable profile but produced no writable entity");
+        }
+    }
+
+    app_device_db_close(&g_db);
+    store_release();
+}
+
 static void test_enrichment_fills_the_table_and_materialisation_applies_it(void)
 {
     app_scan_evidence_t ev;
@@ -1480,6 +1573,7 @@ int main(void)
     test_io_error_during_match_is_detected();
     test_closed_database_cannot_match();
 
+    test_an_esphome_node_becomes_controllable();
     test_enrichment_fills_the_table_and_materialisation_applies_it();
     test_enrichment_without_a_database_reports_unavailable();
     test_recognition_table_capacity_is_reported();

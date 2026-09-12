@@ -1167,6 +1167,37 @@ static bool db_recognizer_recognize(void *ctx, uint32_t sources,
         }
     }
     if (lan != NULL) {
+        /*
+         * An ESPHome node is tried FIRST, and on its own protocol.
+         *
+         * A node is only ever seen as a LAN device advertising `_esphome._tcp`, and the
+         * name that identifies one is the mDNS INSTANCE - the service type is identical
+         * for every node in range. The generic mDNS attempt below keys on the service
+         * TYPE, so without this the profile that exists for a node (keyed on the
+         * instance) could never be reached, and the node would stay generic.
+         *
+         * The order matters in the other direction too: trying mDNS first would resolve
+         * a service-type profile for ANY ESPHome node, which is the "one profile for
+         * every node" hazard. The instance is more specific, so it wins.
+         *
+         * `instance` is empty for an SSDP or Nmap sighting of the same host; that yields
+         * no key and therefore no match, which is the normal "nothing matchable"
+         * outcome rather than an error.
+         */
+        if (lan->instance[0] != '\0') {
+            memset(&attempt, 0, sizeof(attempt));
+            (void)app_device_db_match(db, APP_SOURCE_LAN, DEVICE_DB_PROTO_ESPHOME, NULL, 0u,
+                                      NULL, NULL, lan, &attempt);
+            if (attempt.ambiguous) {
+                *out = attempt;
+                return true;
+            }
+            if (attempt.matched) {
+                *out = attempt;
+                return true;
+            }
+        }
+
         memset(&attempt, 0, sizeof(attempt));
         (void)app_device_db_match(db, APP_SOURCE_LAN, DEVICE_DB_PROTO_MDNS, NULL,
                                   0u, NULL, NULL, lan, &attempt);
