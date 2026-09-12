@@ -44,7 +44,7 @@ assert(allr(fd,m1,4)&&m1[0]==0x00&&m1[1]==0x01&&m1[2]==0x00&&m1[3]==0x00);
 {uint8_t sh[3];assert(allr(fd,sh,3));assert(sh[0]==0x01&&(((unsigned)sh[1]<<8)|sh[2])==48u);}
 assert(allr(fd,m1,48));
 if(!ntr_handshake(&st,m1,m2)){/* Wrong PSK: report it the way an ESPHome peer does. */uint8_t err[4]={0x01,0x00,0x01,0x01};(void)send(fd,err,sizeof(err),0);close(fd);return NULL;}
-{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;fprintf(stderr,"T peer m2 = %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",m2[32],m2[33],m2[34],m2[35],m2[36],m2[37],m2[38],m2[39],m2[40],m2[41],m2[42],m2[43],m2[44],m2[45],m2[46],m2[47]);fflush(stderr);assert(allw(fd,hdr,3)&&allw(fd,m2,48));
+{uint8_t ssend[32],srecv[32];assert(ntr_split(&st,ssend,srecv));uint8_t hdr[3];hdr[0]=0x01;hdr[1]=0;hdr[2]=48;fprintf(stderr,"T peer m2 = %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",m2[32],m2[33],m2[34],m2[35],m2[36],m2[37],m2[38],m2[39],m2[40],m2[41],m2[42],m2[43],m2[44],m2[45],m2[46],m2[47]);fflush(stderr);fprintf(stderr,"T peer m2 = %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",m2[32],m2[33],m2[34],m2[35],m2[36],m2[37],m2[38],m2[39],m2[40],m2[41],m2[42],m2[43],m2[44],m2[45],m2[46],m2[47]);fflush(stderr);assert(allw(fd,hdr,3)&&allw(fd,m2,48));
 if(g_noise_mode==2){/* Handshake accepted, then frames that are not authentic
  * ciphertext: the client must drop them, never dispatch them, and eventually
  * disconnect rather than loop forever. */
@@ -56,7 +56,7 @@ close(fd);return NULL;}
 assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==1&&n==0);
 esphome_pb_writer_t w;esphome_pb_writer_init(&w,pl,sizeof(pl));esphome_pb_put_varint(&w,1,1);esphome_pb_put_varint(&w,2,15);esphome_pb_put_string(&w,3,"ESPHome 2026.8.0",32);esphome_pb_put_string(&w,4,"noise-node",31);size_t fl=ntr_seal(&st,2,pl,w.len,fr,sizeof(fr));assert(fl&&allw(fd,fr,fl));
 /* DeviceInfoRequest / response. */
-assert(allr(fd,fr,3)&&fr[0]==0x01);n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==9);
+{uint8_t fh[3];if(!allr(fd,fh,3)){fprintf(stderr,"T peer: no frame header\n");fflush(stderr);}else{fprintf(stderr,"T peer frame hdr = %02x %02x %02x\n",fh[0],fh[1],fh[2]);fflush(stderr);fr[0]=fh[0];fr[1]=fh[1];fr[2]=fh[2];}assert(fr[0]==0x01);}n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==9);
 esphome_pb_writer_init(&w,pl,sizeof(pl));esphome_pb_put_string(&w,2,"noise-node",31);esphome_pb_put_string(&w,3,"AA:BB:CC:DD:EE:FF",17);esphome_pb_put_string(&w,4,"2026.8.0",32);esphome_pb_put_string(&w,6,"esp32-c6",127);esphome_pb_put_string(&w,12,"Espressif",20);esphome_pb_put_string(&w,13,"Kitchen Node",120);fl=ntr_seal(&st,10,pl,w.len,fr,sizeof(fr));assert(fl&&allw(fd,fr,fl));
 /* ListEntitiesRequest: one switch plus the finished marker. */
 assert(allr(fd,fr,3)&&fr[0]==0x01);n=((size_t)fr[1]<<8)|fr[2];assert(n<=sizeof(fr)&&allr(fd,fr,n));assert(ntr_open(&st,fr,n,&t,pl,sizeof(pl),&n)&&t==11);
