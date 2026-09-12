@@ -106,7 +106,7 @@ sysroot 没有）：`esphome_l2`、`nmap_l2`。它们在**编译期**因系统�
 | B4 DB 格式/工具 | 完成 | 通过 | 通过 | 不适用 | — |
 | **B5 SD 读取/识别/配方** | **完成** | **通过** | **通过** | **未做** | 已合并进 main；见 §4 |
 | **B6 配网与导入后端** | **完成（软件）** | **通过** | **通过** | **未做** | NVS 重启行为与浏览器交互未实测；见 §4b |
-| B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt 组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建；**固件适配器、control 后端、GATT 组件自身的 cancel 竞态仍未做**；见 §4d |
+| B7 BLE GATT / ESPHome | 部分（认证传输已通） | 通过（新增 app_ble_gatt、app_ble_native 两组） | 通过 | 未做 | ESPHome Noise 与认证控制已实现并 host 验证；实节点未验证。BLE GATT 会话生命周期已建，**固件适配器已完成并有 96 项 host 检查**；仍未做：control 后端、设备地址字节序约定、GATT 组件 deinit 的 use-after-free；见 §4d |
 | B8 Zigbee 原生后端 | 未开始 | 部分 | 通过 | — | 无原生 coordinator；无应用通路 |
 | B9 OpenThread / Matter | 部分 | 通过 | 通过 | 未做 | Matter 构建未修；Thread 生命周期未接应用 |
 | **B10 统一控制闭环** | **模块 + 已接线** | **通过** | **通过** | **未做** | 更正：本轮把 `APP_DIAG_CMD_CONTROL` 从直接返回 `NOT_IMPLEMENTED` 改为调用 `app_control_submit()`，控制循环第一次真正可达。仍无后端注册，因此正确答复是 `NO_BACKEND`；`app_runtime.c` 只能由目标构建编译，实板未验 |
@@ -221,7 +221,9 @@ AMBIGUOUS_BACKEND，歧义绝不是猜测的许可）。
 也就是说根本没有被编译进镜像的代码去执行它们。现在这条链是真实可达的。
 
 **仍未做完**：没有任何后端注册，所以运行时的正确答复是 `NO_BACKEND`——这是设计状态，
-不是缺陷；要让 BLE 或 ESPHome 真正可写，还需要 B7 的固件适配器与控制后端。
+不是缺陷；要让 BLE 或 ESPHome 真正可写，还需要 B7 的控制后端（固件适配器本轮已完成）。
+另外 `app_backend_is_drivable()` 对所有控制后端返回 false，实体的写目标因此会在识别阶段
+被丢掉（`app_device_db.c` 只在 drivable 时保留），所以即使注册了后端，可写实体仍然为空。
 `app_runtime.c` 是 ESP-IDF-only，只能由目标构建编译（已通过）与实板验证，不能 host 测试。
 
 ### B11 软件验收
@@ -284,11 +286,45 @@ GATT 层本身是同步包装：一个共享完成槽、没有会话身份。三
 `turn_on`/`turn_off`/`set_value`/`set_text` 加 scale 的编解码，以及无法编码时报 `UNSUPPORTED`
 而不是猜一种编码。
 
+### B7 已完成：固件适配器（本轮，commit `0976d2b`）
+
+`firmware/main/app_ble_gatt_native.{c,h}` 把 `app_ble_gatt_session_*` 绑到真实的
+`esphome_ble_gatt_*`：install 填 ops 表，`gatt_init` 把平台 radio 对注入 transport config。
+测试组 `app_ble_native` 用**真实的** `esphome_ble_gatt.c` + 假 radio 驱动它（只替换
+`esphome_ble_gatt_nimble.c`），**96 checks，0 failures**，本机 clang 与 CI 的 gcc 走同一份
+`tests/host/run_app_ble_native_tests.sh`。
+
+写这个测试时查出并修掉了适配器自身的两个真缺陷，都属于"只在实机上才会暴露"的类型：
+
+1. **平台 radio 钩子收到两个不同的上下文**。会话的 acquire/release 经适配器以
+   `radio_ctx` 调用平台对，而 transport 在 connect 内部自己 suspend 时传的是
+   `radio_user`。适配器把 `radio_user` 设成了**适配器自身**，于是同一个平台函数在两条
+   路径上拿到不同指针，从错误的结构体里读自己的状态（suspend 计数读出
+   1357958449 这样的垃圾值，第二次 suspend 失败）。现在 `radio_user = radio_ctx`。
+2. **读失败后调用者的缓冲区里留着 transport 的垃圾**。适配器原先在调用**之前**清零，
+   于是最后写缓冲区的是失败路径——调用者只要记下错误继续跑，就会把那几个字节当作读数
+   发布出去。现在改为**非 OK 返回之后**清零：成功读不受影响，"读失败"和"值为空"成为同一
+   个可观测状态。
+
+另外两处支撑性修正：
+
+3. `esphome_ble_gatt_session_t` 现在显式 `_Alignas(max_align_t)`。transport 内部把
+   session 强转成 impl 结构，所以 session 必须按最严格成员对齐；不加这个说明符时对齐
+   跟随 `size_t`，而 `app_ble_gatt_session_t` 是 1784 字节，嵌在它后面的 session 就会
+   落在 8 字节边界上。UBSan 在 host 上抓到了这一点。
+4. `esphome_ble_gatt_init()` 改为安装**有名字的** backend
+   （`ESPHOME_BLE_GATT_BACKEND`，默认仍是 NimBLE）。这是 host 测试"真实 transport +
+   脚本化 radio"的正式替换点；替换 `esphome_ble_gatt_init()` 本身意味着真实那份不再被
+   编译，那样测试就没有意义。
+
+*未验证*：该适配器从未对真实 peer 跑过，也没有目标构建。设备地址字节序（§ 下文第 1 条）
+仍未定，适配器目前不转换。
+
 ### B7 未完成项（明确列出）
 
-- **固件适配器**：把 `app_ble_gatt_session_*` 绑到 `esphome_ble_gatt_*` 的 ops 实现（含地址字节序
-  转换：`esphome_ble_gatt_nimble.c` 会反转 6 字节，而扫描证据是 NimBLE 原始顺序，两侧约定不一致，
-  必须先定一个并写成有回归表的函数）。
+- ~~**固件适配器**~~：已完成，见上。**地址字节序**仍未定：`esphome_ble_gatt_nimble.c`
+  会反转 6 字节，而扫描证据是 NimBLE 原始顺序，两侧约定不一致，必须先定一个并写成有
+  回归表的函数；当前适配器**不做任何转换**，因此这一项仍然阻塞实机 BLE 控制。
 - **control 后端**：`claims`/`send` 实现并注册进 `app_control`；通知 → `app_control_report()`/
   `app_control_confirm()`。注意 `app_control_backend_ops_t::send` 不传 request_id，而确认只认
   request_id，需要扩展 vtable 或让适配器用 `app_control_pending_at()` 反查。
@@ -467,14 +503,26 @@ python tools/reference/noise_transport_reference.py
 
 ## 6. 测试命令与结果
 
-### 本机（2026-09-11，本轮）
+### 本机（2026-09-12，本轮新增组）
+
+```powershell
+cd D:\OS\One-OS
+.\tools\local\run-host-tests.ps1                      # 全部组
+.\tools\local\run-host-tests.ps1 -Group app_ble_native # 本轮新增的 BLE 适配器组
+```
+
+新增组 `app_ble_native`：**96 checks，0 failures**（CI 用同一份
+`tests/host/run_app_ble_native_tests.sh`，额外带 ASan+UBSan）。它编译**真实的**
+`esphome_ble_gatt.c`，只把 NimBLE 后端替换成脚本化 radio。
+
+### 本机（2026-09-11，上一轮）
 
 ```powershell
 cd D:\OS\One-OS
 .\tools\local\run-host-tests.ps1
 ```
 
-结果：**16 组通过，2 组因本机缺 POSIX socket 头失败（esphome_l2、nmap_l2），后者只在 CI 验证。**
+结果：**19 组通过，2 组因本机缺 POSIX socket 头失败（esphome_l2、nmap_l2），后者只在 CI 验证。**
 
 **本机通过不等于 CI 通过**：本机无法编译 ESP-IDF 专属文件（如 `app_scan_native.c`），
 目标构建只在 CI 进行。本轮就出现过本机 15 组全绿、而 CI 目标构建失败的两次
@@ -493,10 +541,13 @@ cd D:\OS\One-OS
 | `app_db_import` | 150 | 0 |
 | `app_portal` | 95 | 0 |
 | `app_provision` | 120 | 0 |
+| `app_ble_gatt` | 177 | 0 |
+| `app_ble_native`（本轮新增） | 96 | 0 |
+| `app_acceptance` | 581 | 0 |
 | `device_db_python` | 36 | 0 |
 | `device_db_format` | 200 | 0 |
 
-（16 组在本机通过；`esphome_l2` 与 `nmap_l2` 见上文。）
+（21 组在本机通过；`esphome_l2` 与 `nmap_l2` 见上文。）
 
 ### CI
 
