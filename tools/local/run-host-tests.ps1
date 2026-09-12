@@ -120,7 +120,17 @@ function Invoke-Group {
             $flags = @('-std=gnu11', '-Wall', '-Wextra', '-Werror', '-O2')
             $es = Join-Path $Root 'firmware\components\esphome_l2'
 
-            # These two are platform-neutral and therefore runnable here.
+            # test_api_client needs POSIX sockets. tests/esphome_l2/stubs/win
+            # supplies an in-process loopback and tools/local/build-win-shim-test.ps1
+            # builds a rewritten copy of the test against it, but that harness is
+            # NOT yet finished: it drives the plaintext handshake correctly and
+            # deadlocks on the encrypted path, because it does not model TCP flow
+            # control. It is therefore not wired in here, and the strongest test in
+            # this group is still only compiled and run by CI. That gap is exactly
+            # how a target-only compile error and three gcc-only warnings reached CI
+            # before; see the handover ledger.
+            #
+            # These four are runnable here.
             $nc = Join-Path $work 'test_noise_crypto.exe'
             Invoke-Step 'compile test_noise_crypto' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_noise_crypto.c'),
@@ -135,10 +145,6 @@ function Invoke-Group {
                     (Join-Path $Root 'tests\esphome_l2\test_noise.c'), '-o', $n))
             Invoke-Step 'run test_noise' $n @()
 
-            # test_gatt, test_codec and test_api_client need <sys/socket.h>,
-            # <arpa/inet.h> and a POSIX host, so this Windows mirror cannot
-            # compile them; tests/esphome_l2/run_host_tests.sh is authoritative
-            # and CI runs it on Linux. They fail loudly here, never silently.
             $g = Join-Path $work 'test_gatt.exe'
             Invoke-Step 'compile test_gatt' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_ble_gatt.c'),
@@ -151,6 +157,9 @@ function Invoke-Group {
                     (Join-Path $Root 'tests\esphome_l2\test_codec.c'), '-lm', '-o', $c))
             Invoke-Step 'run test_codec' $c @()
 
+            # test_api_client needs <sys/socket.h> and a POSIX host, so this
+            # mirror cannot compile it. It fails loudly here rather than being
+            # skipped; CI compiles and runs it on Linux.
             $a = Join-Path $work 'test_api_client.exe'
             Invoke-Step 'compile test_api_client' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_api.c'),

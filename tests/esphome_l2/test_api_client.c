@@ -85,7 +85,7 @@ port=start_server(&th,&a,1);c.port=port;assert(esphome_api_init(&s,&c)==ESP_OK);
 {uint8_t psk[32];for(unsigned i=0;i<32;i++)psk[i]=(uint8_t)(0xa0u+i);memcpy(g_psk,psk,32);g_cmd_type=0;g_cmd_len=0;memset(g_cmd_payload,0,sizeof(g_cmd_payload));
 port=start_nserver(&th,&a,0);c.port=port;c.noise_psk=psk;c.noise_psk_len=sizeof(psk);
 assert(esphome_api_init(&s,&c)==ESP_OK);
-assert(esphome_api_probe(&s,&pr)==ESP_OK&&!strcmp(pr.name,"noise-node")&&!strcmp(pr.model,"esp32-c6"));
+{esp_err_t pe=esphome_api_probe(&s,&pr);if(pe!=ESP_OK||strcmp(pr.name,"noise-node")||strcmp(pr.model,"esp32-c6")){fprintf(stderr,"noise probe failed: err=%d proto=%d name='%s' model='%s' ver=%u.%u\n",(int)pe,(int)esphome_api_last_protocol_error(&s),pr.name,pr.model,(unsigned)pr.api_version_major,(unsigned)pr.api_version_minor);fflush(stderr);}assert(pe==ESP_OK&&!strcmp(pr.name,"noise-node")&&!strcmp(pr.model,"esp32-c6"));}
 esphome_api_entity_t nitem[2];esphome_api_entity_list_t nlist={.items=nitem,.capacity=2};
 assert(esphome_api_entities(&s,&nlist)==ESP_OK&&nlist.count==1&&nlist.total_seen==1&&!nlist.truncated&&nitem[0].kind==ESPHOME_API_ENTITY_SWITCH);
 assert(esphome_api_subscribe(&s,scb_off,NULL)==ESP_OK);
