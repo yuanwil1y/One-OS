@@ -231,7 +231,8 @@ def test_validator_accepts_committed_fixture() -> None:
     if not path.exists():
         return
     db = validator.validate(path.read_bytes())
-    check(db.info.profile_count == 5, "fixture has 5 profiles")
+    # 1006 is the ESPHome profile: an mDNS-instance-keyed node with an ESPHOME_API recipe.
+    check(db.info.profile_count == 6, "fixture has 6 profiles")
     check(db.info.build_timestamp == 0, "fixture timestamp is 0 (reproducible)")
 
     # The ambiguous pair really shares a key.

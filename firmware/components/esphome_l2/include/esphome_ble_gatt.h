@@ -1,4 +1,26 @@
 #pragma once
+/* BLE GATT central: connect, discover, read, write, subscribe, cancel, disconnect.
+ *
+ * THREADING AND LIFETIME CONTRACT (the caller must honour all of it):
+ *
+ *  - One operation at a time per session. A second call while one is in flight
+ *    returns ESP_ERR_INVALID_STATE; this is not a queue.
+ *  - Notification callbacks run on the backend's own task (the NimBLE host task
+ *    in the ESP-IDF backend), NOT on the task that called subscribe(). They may
+ *    therefore run concurrently with a call from another task.
+ *  - A callback must not call back into this component. A GATT operation issued
+ *    from a notification callback waits for a completion that only the task it
+ *    is running on could produce, and deadlocks.
+ *  - The `user` pointer passed to subscribe() must stay valid until either
+ *    unsubscribe() or a disconnect()/deinit() that returns ESP_OK. A disconnect
+ *    that fails or times out may leave a callback in flight, so the caller must
+ *    not free that context on a failed teardown.
+ *  - cancel() is the only call that is safe while an operation is outstanding.
+ *    It abandons the operation: the operation reports ESP_ERR_INVALID_STATE
+ *    rather than the backend's own result, because a cancel that terminates the
+ *    link can make a pending operation complete with a meaningless success.
+ *  - A timeout tears the link down. It is not retried here.
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -21,7 +43,12 @@ typedef esp_err_t (*esphome_ble_gatt_radio_suspend_fn)(void *user, uintptr_t *re
 typedef void (*esphome_ble_gatt_radio_resume_fn)(void *user, uintptr_t restore_token);
 typedef void (*esphome_ble_gatt_notify_fn)(uint16_t value_handle,const uint8_t *data,size_t data_len,bool truncated,void *user);
 typedef struct { uint32_t connect_timeout_ms,operation_timeout_ms,disconnect_timeout_ms; esphome_ble_gatt_radio_suspend_fn radio_suspend; esphome_ble_gatt_radio_resume_fn radio_resume; void *radio_user; } esphome_ble_gatt_config_t;
-typedef union { max_align_t _align; uint8_t _opaque[ESPHOME_BLE_GATT_SESSION_BYTES]; } esphome_ble_gatt_session_t;
+/* _Alignas(max_align_t) rather than relying on the union's members: the session is
+ * cast to the implementation struct internally, so it must be aligned for the
+ * strictest member. Without it the alignment follows size_t, and a session placed
+ * after an odd multiple of 8 bytes - which is what an application struct embedding
+ * one of these after a 1784-byte member produces - is misaligned for the union. */
+typedef union { _Alignas(max_align_t) max_align_t _align; uint8_t _opaque[ESPHOME_BLE_GATT_SESSION_BYTES]; } esphome_ble_gatt_session_t;
 esp_err_t esphome_ble_gatt_init(esphome_ble_gatt_session_t*,const esphome_ble_gatt_config_t*);
 void esphome_ble_gatt_deinit(esphome_ble_gatt_session_t*);
 esp_err_t esphome_ble_gatt_connect(esphome_ble_gatt_session_t*,const esphome_ble_peer_t*);

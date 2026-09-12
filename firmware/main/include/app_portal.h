@@ -131,6 +131,11 @@ typedef struct {
 /*
  * Build the /api/status document.
  *
+ * `ap_ssid` and `ap_ipv4` are emitted only when `active` is true; with the AP down
+ * they are reported as empty strings whatever the caller put in them, so a browser
+ * (and a person following the hardware checklist) is never sent looking for a
+ * captive portal that is not running.
+ *
  * Returns the written length, or 0 when the buffer is too small - in which case
  * nothing is written and the caller must not send a truncated document to a
  * browser that will try to parse it.
@@ -204,6 +209,30 @@ const char *app_portal_ap_word(size_t index);
  */
 bool app_portal_generate_ap_password(uint32_t (*random_u32)(void), char *out,
                                      size_t out_size);
+
+/* ---------------- native side (ESP-IDF only) ---------------- */
+
+/*
+ * Bounded active scan for the portal's network list.
+ *
+ * Defined in app_portal_native.c because it needs the Wi-Fi driver. Returns false when a
+ * scan cannot run at all - most importantly while the portal's own AP holds the radio -
+ * so the caller reports "unavailable" rather than an empty list the operator would read
+ * as "no networks in range". Returns true with `*out_count == 0` for a genuinely empty
+ * result.
+ */
+bool app_portal_native_wifi_scan(app_portal_ap_t *out, size_t capacity,
+                                 size_t *out_count);
+
+/*
+ * Fill the parts of /api/status that come from the runtime and the Wi-Fi manager: the
+ * station state and address, the AP address, the firmware string, and the recognition
+ * database state and version.
+ *
+ * Called after app_provision_status_snapshot(), which fills the session's own fields;
+ * this supplies what the session has no way to know.
+ */
+void app_portal_native_status_fill(void *ctx, app_portal_status_t *out);
 
 #ifdef __cplusplus
 }

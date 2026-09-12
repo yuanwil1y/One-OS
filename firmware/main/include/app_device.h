@@ -128,7 +128,30 @@ typedef struct {
     char name[HA_CORE_NAME_LEN];
     char unit[HA_CORE_UNIT_LEN];
     bool writable;
+    /*
+     * The recipe's declared value range, carried into the binding so the control loop
+     * can check a requested value without reaching back into the database.
+     *
+     * `has_range` is false for entities that take no value (a switch's turn_on, a
+     * button's press) and for read-only entities, where the range is presentation
+     * metadata rather than a limit on anything this firmware may send. A range of
+     * zero-to-zero is a real range, which is why "no range" needs its own flag rather
+     * than a sentinel value.
+     */
+    bool has_range;
+    int32_t min_value;
+    int32_t max_value;
+    uint32_t scale;
+    /* Backend that owns this writable entity, and the recipe's write target.
+     * APP_ENTITY_BACKEND_NONE means read-only. Resolved at recognition time, so the
+     * control loop never interprets a database record. */
+    uint8_t backend;
+    const char *backend_name;
+    uint32_t write_target_id;
 } app_entity_binding_t;
+
+/* A binding with no control path: what every read-only entity reports. */
+#define APP_ENTITY_BACKEND_NONE 0xFFu
 
 const char *app_recognition_name(app_recognition_state_t state);
 const char *app_availability_name(app_availability_t availability);

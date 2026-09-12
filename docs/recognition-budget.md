@@ -123,6 +123,36 @@ rediscover it.
 | Console task stack | 6 144 | `APP_CONSOLE_STACK` |
 | Diagnostic output buffers | ~4.6 KiB static | `app_diag_console.c` |
 
+### 4b. The SD card and the screen share one SPI2 bus
+
+B5 requires coordinating the card and the display, because on this board they are on
+the same peripheral. The coordination is **structural rather than a lock**, and that
+is deliberate:
+
+| Fact | Where |
+|---|---|
+| One bus instance, with the LCD's MOSI/SCLK and the card's MISO | `board.c::board_spi2_init()` |
+| The call is idempotent (`s_spi2_initialized` short-circuits) | same |
+| The card gets its own chip select and its own VFS mount point | `storage.c::board_sd_mount()` |
+| The database adapter calls `board_sd_mount()` and never touches a bus itself | `app_device_db_sd.c` |
+
+Two consequences worth stating, because both have been the source of exactly this
+class of bug on ESP32 boards:
+
+- **A second `board_spi2_init()` from anywhere is a no-op, not a second bus.**
+  Without that guard, the database adapter's lazy mount would fail with
+  `ESP_ERR_INVALID_STATE` on a board where the screen came up first - and the
+  symptom would be "the card is never detected", not "the bus was initialised
+  twice", which is why the guard is documented here.
+- **Nothing unmounts a card somebody else mounted.** `app_device_db_sd.c` opens and
+  closes *files*, not the bus, so a scan and a database read can overlap without
+  either one tearing down the other's transport.
+
+*Not verified on hardware*: whether panel and card traffic actually interleave
+correctly at the chosen clock, and whether a card insertion or removal mid-scan
+disturbs the panel. Those need the board; they are items 2.1 and 3.x of
+`docs/hardware-acceptance.md`. No throughput figure is claimed here.
+
 ## 5. GUI reservation
 
 The task book requires the LVGL budget to be preserved, and no screen or LVGL

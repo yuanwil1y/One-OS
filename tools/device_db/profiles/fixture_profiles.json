@@ -36,7 +36,9 @@
         "source_name": "one-os-owned-fixtures",
         "review": "Authored for One-OS from the published BTHome v2 layout."
       },
-      "policy": ["passive_only"],
+      "policy": [
+        "passive_only"
+      ],
       "writable": false,
       "theengs_decoder_id": 1,
       "fingerprints": [
@@ -92,7 +94,12 @@
         "source_name": "one-os-owned-fixtures",
         "review": "Authored for One-OS from the Zigbee Cluster Library OnOff definition."
       },
-      "policy": ["safe_read", "auth_required", "user_action_required", "write_control"],
+      "policy": [
+        "safe_read",
+        "auth_required",
+        "user_action_required",
+        "write_control"
+      ],
       "writable": true,
       "zha_quirk_id": 1,
       "fingerprints": [
@@ -153,7 +160,9 @@
         "source_name": "one-os-owned-fixtures",
         "review": "Deliberate variant used to prove AMBIGUOUS behaviour."
       },
-      "policy": ["passive_only"],
+      "policy": [
+        "passive_only"
+      ],
       "writable": false,
       "fingerprints": [
         {
@@ -190,7 +199,9 @@
         "source_name": "one-os-owned-fixtures",
         "review": "Shares the vendor prefix with 1001 but has its own full key, so it must not merge."
       },
-      "policy": ["passive_only"],
+      "policy": [
+        "passive_only"
+      ],
       "writable": false,
       "fingerprints": [
         {
@@ -227,7 +238,9 @@
         "source_name": "one-os-owned-fixtures",
         "review": "mDNS service type that is a published IANA/RFC registration."
       },
-      "policy": ["safe_read"],
+      "policy": [
+        "safe_read"
+      ],
       "writable": false,
       "fingerprints": [
         {
@@ -242,6 +255,63 @@
           "name": "Services",
           "backend": "none",
           "_note": "Presentation only: no protocol value is decoded, so the recipe carries no capability."
+        }
+      ]
+    },
+    {
+      "profile_id": 1006,
+      "vendor": "Example",
+      "model": "NODE-ESP-1",
+      "display_name": "Example ESPHome Node",
+      "icon": "chip",
+      "provenance": {
+        "source_id": 1,
+        "reuse": "copy",
+        "license": "public_domain",
+        "source_revision": "20260912",
+        "source_name": "one-os-owned-fixtures",
+        "review": "Authored for One-OS. The mDNS instance name is what an ESPHome node advertises; the entity keys are declared here because ESPHome keys are opaque uint32 values the node assigns, so they cannot be derived from the object_id deterministically."
+      },
+      "policy": [
+        "safe_read",
+        "auth_required",
+        "user_action_required",
+        "write_control"
+      ],
+      "writable": true,
+      "fingerprints": [
+        {
+          "protocol": "esphome",
+          "key": "examplenode1",
+          "_note": "The mDNS service INSTANCE, which for ESPHome is the node name. Not the service type _esphome._tcp, which is identical for every node in range. Written in the NORMALISED form the firmware canonicalises to (lowercase, hyphens and colons stripped), because the key hash is computed over the canonical bytes: the node name example-node-1 is stored as examplenode1."
+        }
+      ],
+      "identity_rules": [
+        {
+          "kind": "esphome_node_name",
+          "strength": "strong",
+          "_note": "A safe cross-protocol identity per device-db-format 5.5."
+        }
+      ],
+      "recipes": [
+        {
+          "domain": "switch",
+          "name": "Relay",
+          "backend": "esphome_api",
+          "write_target_id": 264517695,
+          "_write_target": "The ESPHome entity key the node assigns to this switch (object_id relay). Declared, not derived: ESPHome keys are opaque uint32s.",
+          "min_value": 0,
+          "max_value": 0
+        },
+        {
+          "domain": "sensor",
+          "name": "Uptime",
+          "device_class": "duration",
+          "unit": "s",
+          "backend": "passive_value",
+          "read_source_id": 0,
+          "min_value": 0,
+          "max_value": 0
         }
       ]
     }

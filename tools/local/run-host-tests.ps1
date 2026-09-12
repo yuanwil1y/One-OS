@@ -114,10 +114,36 @@ function Invoke-Group {
         'esphome_l2' {
             $inc = @(
                 "-I$(Join-Path $Root 'tests\esphome_l2\stubs')",
+                "-I$(Join-Path $Root 'tests\esphome_l2')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')",
                 "-I$(Join-Path $Root 'firmware\components\esphome_l2')")
             $flags = @('-std=gnu11', '-Wall', '-Wextra', '-Werror', '-O2')
             $es = Join-Path $Root 'firmware\components\esphome_l2'
+
+            # test_api_client needs POSIX sockets. tests/esphome_l2/stubs/win
+            # supplies an in-process loopback and tools/local/build-win-shim-test.ps1
+            # builds a rewritten copy of the test against it, but that harness is
+            # NOT yet finished: it drives the plaintext handshake correctly and
+            # deadlocks on the encrypted path, because it does not model TCP flow
+            # control. It is therefore not wired in here, and the strongest test in
+            # this group is still only compiled and run by CI. That gap is exactly
+            # how a target-only compile error and three gcc-only warnings reached CI
+            # before; see the handover ledger.
+            #
+            # These four are runnable here.
+            $nc = Join-Path $work 'test_noise_crypto.exe'
+            Invoke-Step 'compile test_noise_crypto' $CC (@($flags) + @($inc) + @(
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $Root 'tests\esphome_l2\test_noise_crypto.c'), '-o', $nc))
+            Invoke-Step 'run test_noise_crypto' $nc @()
+
+            $n = Join-Path $work 'test_noise.exe'
+            Invoke-Step 'compile test_noise' $CC (@($flags) + @($inc) + @(
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $es 'esphome_noise.c'),
+                    (Join-Path $Root 'tests\esphome_l2\noise_test_responder.c'),
+                    (Join-Path $Root 'tests\esphome_l2\test_noise.c'), '-o', $n))
+            Invoke-Step 'run test_noise' $n @()
 
             $g = Join-Path $work 'test_gatt.exe'
             Invoke-Step 'compile test_gatt' $CC (@($flags) + @($inc) + @(
@@ -131,10 +157,16 @@ function Invoke-Group {
                     (Join-Path $Root 'tests\esphome_l2\test_codec.c'), '-lm', '-o', $c))
             Invoke-Step 'run test_codec' $c @()
 
+            # test_api_client needs <sys/socket.h> and a POSIX host, so this
+            # mirror cannot compile it. It fails loudly here rather than being
+            # skipped; CI compiles and runs it on Linux.
             $a = Join-Path $work 'test_api_client.exe'
             Invoke-Step 'compile test_api_client' $CC (@($flags) + @($inc) + @(
                     (Join-Path $es 'esphome_api.c'),
                     (Join-Path $es 'esphome_api_codec.c'),
+                    (Join-Path $es 'esphome_noise.c'),
+                    (Join-Path $es 'esphome_noise_crypto.c'),
+                    (Join-Path $Root 'tests\esphome_l2\noise_test_responder.c'),
                     (Join-Path $Root 'tests\esphome_l2\test_api_client.c'),
                     '-pthread', '-o', $a))
             Invoke-Step 'run test_api_client' $a @()
@@ -223,6 +255,27 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\test_app_diag_protocol.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')")
         }
+        'app_cli_session' {
+            # The headless acceptance loop: the lines an operator types at the serial
+            # console while working through docs/hardware-acceptance.md, driven
+            # through the real parse -> decide -> render path. app_control and
+            # app_scan make the decisions, so this group needs their dependencies.
+            Build-And-Run 'app_cli_session' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_diag_protocol.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_cli_session.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
         'app_ops' {
             Build-And-Run 'app_ops' @(
                 (Join-Path $m 'app_ops.c'),
@@ -299,6 +352,155 @@ function Invoke-Group {
                 (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
                 (Join-Path $Root 'tests\host\test_app_provision.c')
             ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$(Join-Path $hc 'include')")
+        }
+        'app_control' {
+            # APP_DEVICE_TEST_HOOKS compiles the app_device test hooks in. The macro is
+            # set only by host runners, so the firmware image never contains them.
+            Build-And-Run 'app_control' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_control.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
+        'app_ble_gatt' {
+            # Platform independent: the GATT operations arrive through a vtable,
+            # so the session lifecycle is driven by a scripted backend here.
+            Build-And-Run 'app_ble_gatt' @(
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $Root 'tests\host\test_app_ble_gatt.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
+        }
+        'app_ble_addr' {
+            # The BLE address byte-order convention. Tiny and dependency-free; the
+            # group exists because the dangerous failure - a conversion applied
+            # twice - is byte-for-byte identical to no conversion, so the vectors
+            # are anchored to a real address written both ways.
+            Build-And-Run 'app_ble_addr' @(
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $Root 'tests\host\test_app_ble_addr.c')
+            ) @("-I$(Join-Path $m 'include')")
+        }
+        'app_ble_native' {
+            # The other half of the BLE boundary: the ops table the FIRMWARE
+            # supplies, built on the real esphome_l2 transport. The radio is the
+            # only fake - esphome_ble_gatt_nimble.c is replaced by
+            # tests/host/fake_ble_transport.c, which implements the same ops table
+            # the NimBLE backend does. The forced include is what selects it, and
+            # is why this group cannot just be another Build-And-Run line.
+            $exe = Join-Path $work 'test_app_ble_native.exe'
+            Invoke-Step 'compile test_app_ble_native' $CC (@($flags) + @(
+                    '-fno-omit-frame-pointer',
+                    '-include', (Join-Path $Root 'tests\host\fake_ble_backend_decl.h'),
+                    "-I$(Join-Path $Root 'tests\host\ble_stubs')",
+                    "-I$stubs",
+                    "-I$(Join-Path $Root 'tests\host')",
+                    "-I$(Join-Path $m 'include')",
+                    "-I$m",
+                    "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')",
+                    "-I$(Join-Path $Root 'firmware\components\esphome_l2')",
+                    (Join-Path $Root 'firmware\components\esphome_l2\esphome_ble_gatt.c'),
+                    (Join-Path $m 'app_ble_gatt.c'),
+                    (Join-Path $m 'app_ble_addr.c'),
+                    (Join-Path $m 'app_ble_gatt_native.c'),
+                    (Join-Path $Root 'tests\host\fake_ble_transport.c'),
+                    (Join-Path $Root 'tests\host\test_app_ble_native.c'),
+                    '-o', $exe))
+            Invoke-Step 'run test_app_ble_native' $exe @()
+        }
+        'app_ctl_ble' {
+            # The BLE GATT control backend, driven through the REAL app_control loop.
+            # The property it protects is that a successful send is not a state
+            # change, so the assertions are about order: after the send, after the
+            # write, and only then after the device reports.
+            Build-And-Run 'app_ctl_ble' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $m 'app_ctl_ble.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_ble.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
+        'app_ctl_ble_gatt' {
+            # The firmware binding: which characteristic, of which device. A refusal
+            # is visible; a WRONG HANDLE is not - the write succeeds and the wrong
+            # attribute has been changed - so the refusals are what this group tests
+            # hardest.
+            Build-And-Run 'app_ctl_ble_gatt' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ble_addr.c'),
+                (Join-Path $m 'app_ble_gatt.c'),
+                (Join-Path $m 'app_ctl_ble.c'),
+                (Join-Path $m 'app_ctl_ble_gatt.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_ble_gatt.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')")
+        }
+        'app_ctl_esphome' {
+            # The ESPHome control backend. On ESPHome the send-is-not-a-state-change
+            # rule is easier to get wrong than on BLE: a state report arrives on the
+            # same subscription for an entity the device already had a value for, so
+            # confirming on "a report arrived" would mark a refused command confirmed.
+            Build-And-Run 'app_ctl_esphome' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $m 'app_ctl_esphome.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_ctl_esphome.c')
+            ) @("-I$stubs", "-I$(Join-Path $Root 'tests\host')",
+                "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')",
+                "-I$(Join-Path $Root 'firmware\components\esphome_l2\include')") @('-DAPP_DEVICE_TEST_HOOKS')
+        }
+        'app_acceptance' {
+            Build-And-Run 'app_acceptance' @(
+                (Join-Path $hc 'ha_core.c'),
+                (Join-Path $m 'app_str.c'),
+                (Join-Path $m 'app_ops.c'),
+                (Join-Path $m 'app_scan.c'),
+                (Join-Path $m 'device_db_format.c'),
+                (Join-Path $m 'app_recognition.c'),
+                (Join-Path $m 'app_device.c'),
+                (Join-Path $m 'app_control.c'),
+                (Join-Path $Root 'tests\host\stubs\app_l2_lookup_stub.c'),
+                (Join-Path $Root 'tests\host\test_app_acceptance.c')
+            ) @("-I$stubs", "-I$(Join-Path $m 'include')", "-I$m",
+                "-I$(Join-Path $hc 'include')") @('-DAPP_DEVICE_TEST_HOOKS')
         }
         'device_db_python' {
             Invoke-Step 'regenerate fixture' $py @((Join-Path $Root 'tools\device_db\build_device_db.py'))

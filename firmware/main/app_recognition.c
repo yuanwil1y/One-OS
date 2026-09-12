@@ -53,19 +53,47 @@ bool app_backend_is_drivable(uint8_t backend)
         /* Read-only paths: no controller is needed to satisfy them. */
         return true;
     case DEVICE_DB_BACKEND_BLE_GATT:
+        /*
+         * Drivable as of B7: app_ctl_ble is the controller and app_ctl_ble_gatt
+         * answers the one question only the firmware can - which characteristic, of
+         * which connected peer. Both have host groups (app_ctl_ble, 85 checks;
+         * app_ctl_ble_gatt, 53 checks) and the GATT session underneath them has a
+         * third.
+         *
+         * What is still NOT verified for this backend is the radio: no peer has ever
+         * received a write from this firmware. That is item 5b of
+         * docs/hardware-acceptance.md, and it does not change what the switch means -
+         * an entity whose recipe, profile and controller all agree is controllable,
+         * and one whose write is refused is reported as a failed control rather than
+         * silently doing nothing.
+         */
+        return true;
     case DEVICE_DB_BACKEND_ESPHOME_API:
+        /*
+         * Drivable as of B7, on the same grounds as BLE_GATT: app_ctl_esphome is the
+         * controller and it has a host group (109 checks) that drives the REAL
+         * app_control loop, including the case ESPHome makes easy to get wrong - a
+         * state report arrives for an entity the node already had a value for, so
+         * confirming on "a report arrived" would mark a refused command as confirmed.
+         *
+         * What is NOT verified is the wire and the node: no ESPHome node has ever been
+         * contacted by this firmware, and an ESPHome device also cannot yet be matched
+         * to a profile at all unless the corpus keys it on the mDNS instance name (see
+         * the ledger). Neither changes what this switch means.
+         */
+        return true;
     case DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE:
     case DEVICE_DB_BACKEND_ZIGBEE_COMMAND:
     case DEVICE_DB_BACKEND_MATTER_ATTRIBUTE:
     case DEVICE_DB_BACKEND_MATTER_COMMAND:
         /*
-         * The control backends are not wired into the application yet. Until each
-         * has a real, tested controller path, recognition must not present a
-         * control for it: an entity that cannot be driven is worse than no entity,
-         * because the UI would offer an action that silently does nothing.
+         * Still not wired: no controller exists for these yet. Until each has a real,
+         * tested controller path, recognition must not present a control for it: an
+         * entity that cannot be driven is worse than no entity, because the UI would
+         * offer an action that silently does nothing.
          *
-         * This one place is the switch that flips per backend as B7/B8/B9 land,
-         * rather than per-family conditions scattered through the code.
+         * This one place is the switch that flips per backend as B8/B9 land, rather
+         * than per-family conditions scattered through the code.
          */
         return false;
     default:

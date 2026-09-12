@@ -39,6 +39,9 @@ extern "C" {
 #define APP_SCAN_MAX_SSID 32u
 #define APP_SCAN_MAX_HOSTNAME 48u
 #define APP_SCAN_MAX_IPV4 16u
+/* An mDNS service instance: ESPHome uses the node name here, which is what a profile's
+ * `esphome_node_name` identity rule names. Same bound as the parser's field. */
+#define APP_SCAN_MAX_INSTANCE 128u
 #define APP_SCAN_MAX_ADV_BYTES 62u
 #define APP_SCAN_MAX_UUID16 8u
 
@@ -102,6 +105,17 @@ typedef struct {
     uint32_t generation;
     char ipv4[APP_SCAN_MAX_IPV4];
     char hostname[APP_SCAN_MAX_HOSTNAME];
+    /*
+     * The mDNS service INSTANCE - `my-node` in `my-node._esphome._tcp.local` - which is
+     * the only node name a scan can see. `service` below is the service TYPE
+     * (`_esphome._tcp`), which is identical for every ESPHome node in range and
+     * therefore cannot identify one; this is what distinguishes them.
+     *
+     * Empty when the evidence did not come from mDNS, which is not an error: an SSDP or
+     * Nmap sighting of the same host has no instance name, and a merge keeps whichever
+     * sighting had one.
+     */
+    char instance[APP_SCAN_MAX_INSTANCE];
     bool from_mdns;
     bool from_ssdp;
     bool from_nmap;

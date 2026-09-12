@@ -109,9 +109,32 @@ GUI 开始前，至少完成目标版本所需后端的 B10/B11；未支持协�
 - 实现 zigpy_backend_ops 的 ZDO/ZCL 回调和请求关联，不以 fake backend 替代生产无线实现；核对 SDK 所需所有持久化分区。
 - 补主动 report/attribute 事件到应用的通路、TSN/地址/endpoint/cluster 关联和有限重试/取消。
 - 已查明：zigpy_poll 目前只处理 commissioning 和 ZCL transaction deadline，interview 等不到回调时没有同等超时收尾。补每阶段/整体 deadline，测试不返回的 backend 与迟到回调。
+  **核实（2026-09-12）：已完成**。`zigpy_interview_begin_ex()` 带
+  `zigpy_interview_config_t{phase_timeout_ms, overall_timeout_ms}`（默认 5s/30s），
+  `zigpy_poll()` 调用 `poll_interview_deadlines()` 收尾并置 `ZIGPY_STATUS_TIMEOUT`。
+  测试：`test_interview_phase_timeout_without_callback`、
+  `test_interview_overall_deadline`、`test_interview_partial_timeout_keeps_evidence`。
 - 已查明：transaction attempts 为 uint8_t，retries 可为 255；poll 递增可能回绕并持续重试。限制合法重试次数或用不会回绕的计数，增加边界测试。
+  **核实：已完成**。`ZIGPY_MAX_RETRIES 254`，`start_transaction()` 会把调用者的 retries
+  夹到这个上限；测试 `test_retry_limit_does_not_wrap`、`test_retry_limit_bounded_case_unchanged`。
 - re-interview 开始会清 snapshot：由组件或应用保留 last-known-good，失败不得毁掉现有设备资料。
+  **核实：已完成**。`last_good_snapshot` + `zigpy_interview_get_last_good_snapshot()`；
+  测试 `test_last_good_snapshot_survives_failed_reinterview`。
 - 验收：一台标准设备入网→interview→读→控制→report，重启仍恢复原网络；sleepy/不响应设备有限退出，255 等极值不无限重试。
+
+**核实后的真实剩余（2026-09-12）**：上面三条软件缺陷**已全部修完并有 host 测试**
+（`zha_zigpy_l2` 组，本机与 CI 均通过）。B8 真正缺的是**原生后端本身**：
+
+1. `esp_zigbee` SDK 依赖在本仓库中**完全不存在**（`grep esp_zb_` 无任何结果），
+   需要把它加进构建并选定与 IDF v6.1 兼容的版本；
+2. coordinator 生命周期（启动、网络恢复、permit-join、join 事件）、ZDO/ZCL 回调绑定、
+   所需的 NVS/持久化分区；
+3. `app_scan.c` 的 `APP_STAGE_ZIGBEE` 目前固定返回 `zigbee_backend_unavailable`，
+   后端接入后要改成真实判定；
+4. 802.15.4 的射频交接：与 Wi-Fi/BLE/Thread 共享同一 radio，必须沿用既有的串行交接方式。
+
+第 1、2 项不需要实板就能写出可编译的代码，但**只有一台真实 Zigbee 设备能证明它工作**，
+所以这一阶段的验收无法在没有设备时闭合。
 
 ## B9 — OpenThread / Matter
 

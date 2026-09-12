@@ -9,13 +9,16 @@ extern "C" {
 #endif
 #define ESPHOME_API_DEFAULT_PORT 6053u
 #define ESPHOME_API_MAX_FRAME_BYTES 1024u
+/* Consecutive AEAD failures tolerated before the encrypted session is dropped.
+ * A frame that fails authentication is never dispatched to the parser. */
+#define ESPHOME_API_MAX_DROP_FRAMES 4u
 #define ESPHOME_API_MAX_HOST_LEN 63u
 #define ESPHOME_API_MAX_NAME_LEN 120u
 #define ESPHOME_API_MAX_OBJECT_ID_LEN 120u
 #define ESPHOME_API_MAX_DEVICE_CLASS_LEN 47u
 #define ESPHOME_API_MAX_UNIT_LEN 63u
 #define ESPHOME_API_MAX_STATE_TEXT_LEN 120u
-#define ESPHOME_API_SESSION_BYTES 1280u
+#define ESPHOME_API_SESSION_BYTES 1440u
 typedef enum { ESPHOME_API_PROTOCOL_ERROR_NONE=0,ESPHOME_API_PROTOCOL_ERROR_IO,ESPHOME_API_PROTOCOL_ERROR_MALFORMED,ESPHOME_API_PROTOCOL_ERROR_OVERSIZED,ESPHOME_API_PROTOCOL_ERROR_ENCRYPTION_REQUIRED,ESPHOME_API_PROTOCOL_ERROR_NOISE_NOT_SUPPORTED,ESPHOME_API_PROTOCOL_ERROR_AUTH_REQUIRED,ESPHOME_API_PROTOCOL_ERROR_UNEXPECTED_MESSAGE,ESPHOME_API_PROTOCOL_ERROR_PEER_DISCONNECTED } esphome_api_protocol_error_t;
 typedef struct { const char *host; uint16_t port; uint32_t timeout_ms; uint16_t max_frame_bytes; const uint8_t *noise_psk; size_t noise_psk_len; } esphome_api_config_t;
 typedef struct { uint32_t api_version_major,api_version_minor; char server_info[33],name[32],mac_address[18],esphome_version[33],compilation_time[26],model[128],manufacturer[21],friendly_name[121],project_name[128],project_version[128]; bool api_encryption_supported; } esphome_api_probe_result_t;

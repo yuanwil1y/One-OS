@@ -124,9 +124,40 @@ app_db_state_t app_runtime_db_state(void);
  * "ready v20260911 profiles=5". Never contains credentials. */
 esp_err_t app_runtime_db_describe(char *out, size_t out_size);
 
+/*
+ * Corpus metadata as separate values.
+ *
+ * /api/status and the console both need the version and the profile count as their own
+ * fields rather than as one sentence, and neither may reach into the reader - the
+ * runtime is what owns it. Returns false when no corpus is open, in which case the
+ * outputs are zeroed rather than left holding a previous corpus's numbers, which would
+ * be a status document describing a database that is no longer there.
+ */
+bool app_runtime_db_info(uint32_t *out_content_version, uint32_t *out_profile_count);
+
 /* Absolute path the corpus is read from, so the operator can compare it against
  * what they wrote to the card. */
 const char *app_runtime_db_path(void);
+
+/* ---------------- provisioning portal ---------------- */
+
+/*
+ * Present the active session's credentials, ONCE, to the local caller.
+ *
+ * Deliberately named "present" rather than "get". The AP password and the session token
+ * are shown to the operator at the device and are not readable again: a second call
+ * reports that they were already shown instead of repeating them, so a terminal
+ * scrollback captured later does not contain the password. The product rules put these
+ * values on the device's own presentation and a local output, never in a log or an HTTP
+ * status response - which is why this is a presentation and not a getter.
+ *
+ * Returns false when no session is active.
+ */
+bool app_runtime_portal_present(char *out, size_t out_size);
+
+/* One-line portal report: phase, whether the AP is really up, whether the credentials
+ * were presented, and the upload phase. Never the credentials. */
+esp_err_t app_runtime_portal_status(char *out, size_t out_size);
 
 /*
  * Register the console task so the resource report can include its stack

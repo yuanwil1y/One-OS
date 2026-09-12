@@ -444,10 +444,20 @@ size_t app_portal_build_status_json(const app_portal_status_t *status, char *out
 
     jw_raw(&w, "{\"active\":");
     jw_raw(&w, status->active ? "true" : "false");
+    /*
+     * The AP's own fields are reported only while the AP is up.
+     *
+     * wifi_mgr_ap_ipv4() already answers ESP_ERR_INVALID_STATE once the AP is down
+     * and its caller then empties the field, but this document is what a browser and
+     * an operator read: an address shown next to "active":false sends someone looking
+     * for a captive portal that is not running. Enforcing it here makes the pair of
+     * fields consistent by construction instead of relying on every caller to clear
+     * them, which is the same reason the response shape lives in this file at all.
+     */
     jw_raw(&w, ",\"ap_ssid\":");
-    jw_token(&w, status->ap_ssid);
+    jw_token(&w, status->active ? status->ap_ssid : "");
     jw_raw(&w, ",\"ap_ipv4\":");
-    jw_token(&w, status->ap_ipv4);
+    jw_token(&w, status->active ? status->ap_ipv4 : "");
     jw_raw(&w, ",\"sta_state\":");
     jw_token(&w, status->sta_state != NULL ? status->sta_state : "unknown");
     jw_raw(&w, ",\"sta_ssid\":");

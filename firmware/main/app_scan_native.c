@@ -8,6 +8,7 @@
  */
 
 #include "app_scan_native.h"
+#include "app_ble_addr.h"
 #include "app_str.h"
 
 #include <stdio.h>
@@ -586,7 +587,11 @@ static void ble_report_cb(const kismet_ble_report_t *report, void *ctx)
 
     memset(&obs, 0, sizeof(obs));
     obs.generation = ev->generation;
-    memcpy(obs.address, report->address, 6);
+    /* The radio reports an address least significant byte first; everything above
+     * this boundary holds display order, so this is the one place a scanned address
+     * is converted. See app_ble_addr.h - converting twice is the same as not
+     * converting, so nothing downstream may do it again. */
+    (void)app_ble_addr_to_wire(report->address, obs.address);
     obs.address_type = report->address_type;
     obs.rssi_last = report->rssi;
     obs.connectable = report->connectable;
@@ -922,6 +927,11 @@ static void lan_note_mdns(app_scan_evidence_t *ev, const ha_mdns_service_t *serv
         obs.service_count = 1u;
         (void)app_strlcpy(obs.hostname, service->hostname, sizeof(obs.hostname));
         (void)app_strlcpy(obs.service, service->service_type, sizeof(obs.service));
+        /* The INSTANCE, not the service type. `_esphome._tcp` is the same for every
+         * ESPHome node in range, so the type cannot identify one; the instance
+         * (`my-node._esphome._tcp.local`) is the node name a profile's
+         * esphome_node_name identity rule names. */
+        (void)app_strlcpy(obs.instance, service->instance, sizeof(obs.instance));
         obs.first_seen_ms = now_ms();
         obs.last_seen_ms = obs.first_seen_ms;
         (void)app_scan_ingest_lan(ev, &obs);

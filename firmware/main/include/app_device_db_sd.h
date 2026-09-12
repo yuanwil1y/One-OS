@@ -31,6 +31,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "app_db_import.h"
 #include "app_device_db.h"
 #include "esp_err.h"
 
@@ -56,6 +57,13 @@ typedef struct {
  */
 typedef struct {
     void *file;             /* FILE *, held open for the reader's lifetime */
+    /*
+     * The import's own handles. Distinct from `file` on purpose: the reader's handle is
+     * closed before the corpus renames, and an upload must be able to finish writing and
+     * syncing its ".part" file regardless of what the reader is doing.
+     */
+    void *import_write;
+    void *import_read;
     bool mounted_by_us;     /* we mounted the card and may unmount it */
     bool mount_attempted;   /* a mount was tried; do not spin on a missing card */
     bool medium_present;    /* both the driver and FATFS last reported a card */
@@ -99,6 +107,19 @@ void app_device_db_sd_release(app_device_db_sd_t *sd);
  * successful mount; a failed mount is retried by the next open() rather than here.
  */
 bool app_device_db_sd_medium_present(app_device_db_sd_t *sd);
+
+/*
+ * The same adapter, in the form the DATABASE IMPORT needs.
+ *
+ * The import's vtable has one call the reader's does not: a ranged read, which is what
+ * lets it stream a file's body checksum without holding the file in memory. Rather than a
+ * second adapter over the same card - two file handles and two ideas about the corpus
+ * path - this wraps the reader's ops and serves the ranged read from the same handle.
+ *
+ * So there is one handle, and the coordination the replace sequence depends on ("close the
+ * reader before the renames") really does close the only one.
+ */
+app_db_import_io_t app_device_db_sd_import_ops(void);
 
 #ifdef __cplusplus
 }

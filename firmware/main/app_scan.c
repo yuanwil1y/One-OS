@@ -428,6 +428,16 @@ bool app_scan_ingest_lan(app_scan_evidence_t *ev, const app_scan_lan_t *obs)
         if (obs->service[0] != '\0' && existing->service[0] == '\0') {
             (void)app_strlcpy(existing->service, obs->service, sizeof(existing->service));
         }
+        /*
+         * The instance name follows the same rule as the hostname and the service, and
+         * it matters more than either: it is what an ESPHome profile is keyed on, so a
+         * merge that dropped it would make the host unmatchable as soon as an SSDP or
+         * Nmap sighting arrived first. Only filled when the existing record has none, so
+         * two mDNS sightings of one host cannot overwrite each other's name.
+         */
+        if (obs->instance[0] != '\0' && existing->instance[0] == '\0') {
+            (void)app_strlcpy(existing->instance, obs->instance, sizeof(existing->instance));
+        }
         if (obs->service_count > 0u) {
             existing->service_count += obs->service_count;
         }

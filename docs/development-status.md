@@ -300,10 +300,16 @@ fixture **仅用于测试**：`tests/fixtures` 不被固件构建引用，flash 
 - **实板验证仍全部待办**：未插卡、未烧录。SD 挂载、共享 SPI2 与 LCD 的并发、
   真实读取耗时、拔卡行为、任何 RAM/栈数值都没有测量过。
 
-### 过期文档更正
+### 分支状态（更正后的准确表述）
 
-`development-status.md` 早前记录"远端仅剩 main 与 matter 研究分支"，与当前
-`git branch -a` 不符（仍存在 `feat/b5-recognition` 及多个 `research/*`）。已在
-[交接记录](handover-ledger.md) 第 1 节更正，本轮不重启分支清理。
+本节早前曾记录"远端仅剩 main 与 matter 研究分支"被本轮判为过期，**那个判断本身是错的**：
+它依据的是 `git branch -a`，而那个列表里混有本地缓存的陈旧远端引用。用
+`git ls-remote --heads origin` 复核后，远端确实只有 `main` 与
+`research/matter-chip-tool-l2-api`，唯一例外是 B5 自己的工作分支。
+
+PR #20 合并后该分支已删除，远端现在就是 `main` 与 `research/matter-chip-tool-l2-api`。
+
+判断远端状态请用 `git ls-remote` 或 prune 之后的 `git branch -r`，不要用
+`git branch -a`。详见[交接记录](handover-ledger.md) 第 1 节。
 
 

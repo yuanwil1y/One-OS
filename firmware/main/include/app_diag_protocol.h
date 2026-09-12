@@ -40,6 +40,16 @@ typedef enum {
     APP_DIAG_CMD_DEVICES,
     APP_DIAG_CMD_ENTITIES,
     APP_DIAG_CMD_CONTROL,
+    /*
+     * Provisioning portal control, from the local serial console only.
+     *
+     * This is the exit that starts a provisioning session and prints the temporary AP
+     * password. The product rules put that password on the device's own presentation and
+     * a local serial output and nowhere else: not in a log, not in /api/status, and not
+     * in any HTTP response. A serial console is local by construction, which is what
+     * makes it the right place for it and the HTTP transport the wrong one.
+     */
+    APP_DIAG_CMD_PORTAL,
     APP_DIAG_CMD_UNKNOWN,
 } app_diag_command_t;
 

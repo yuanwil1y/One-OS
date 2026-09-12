@@ -277,6 +277,58 @@ static void test_ble_address_type_is_part_of_identity(void)
     CHECK(app_device_find("ble_01010203040506") != NULL, "type 1 device");
 }
 
+/*
+ * A BLE device id prints its address the way a person reads it.
+ *
+ * The generated id is the address's hex, so it is the visible consequence of the
+ * byte-order convention in app_ble_addr.h: holding the radio's order here would
+ * make the id read backwards, and it would no longer match a database's
+ * BLE_PUBLIC_ADDRESS key, which is written the way a human reads a label. The
+ * address below is a real-shaped public address in display order, and the id is
+ * pinned byte for byte rather than compared against a second call that would share
+ * the same bug.
+ */
+static void test_ble_device_id_is_display_order(void)
+{
+    static const uint8_t display[6] = {0xc4u, 0x99u, 0x4cu, 0x1au, 0x2bu, 0x3du};
+    static const uint8_t controller[6] = {0x3du, 0x2bu, 0x1au, 0x4cu, 0x99u, 0xc4u};
+    app_scan_evidence_t ev;
+    app_scan_ble_t obs;
+    char id[HA_CORE_ID_LEN];
+    bool truncated = false;
+
+    /* The identity helper is the single place the id is built, so it is checked
+     * directly as well as through materialisation. */
+    memset(&obs, 0, sizeof(obs));
+    memcpy(obs.address, display, sizeof(display));
+    obs.address_type = 0u;
+
+    CHECK(app_device_identity_of_ble(&obs, id, sizeof(id)) == strlen("ble_00c4994c1a2b3d"),
+          "the BLE id is '%s'", id);
+    CHECK(strcmp(id, "ble_00c4994c1a2b3d") == 0,
+          "a display-order address must produce a readable id, got '%s'", id);
+
+    /* The same bytes in the radio's order are a different string, which is what
+     * makes this test able to fail: a comparison against the other order is not a
+     * comparison against itself. */
+    memcpy(obs.address, controller, sizeof(controller));
+    CHECK(app_device_identity_of_ble(&obs, id, sizeof(id)) > 0u, "the reverse produced no id");
+    CHECK(strcmp(id, "ble_00c4994c1a2b3d") != 0,
+          "the two byte orders must produce different ids, or this test proves nothing");
+
+    /* And through the real path: a materialised device carries that id. */
+    app_device_table_reset();
+    app_scan_evidence_reset(&ev, 1u);
+    app_device_generation_begin(1u);
+    feed_ble(&ev, display, 0u, "Ordered", -50, false, 0, 100u);
+    (void)app_device_materialize(&ev, NULL, &truncated);
+
+    CHECK(app_device_count() == 1u, "one device materialised, got %u",
+          (unsigned)app_device_count());
+    CHECK(app_device_find("ble_00c4994c1a2b3d") != NULL,
+          "the materialised device id does not read in display order");
+}
+
 static void test_repeat_materialize_does_not_grow(void)
 {
     app_scan_evidence_t ev;
@@ -780,9 +832,16 @@ static void test_hostile_ssid_is_not_injected(void)
 
 static void test_control_is_not_wired(void)
 {
-    /* Nothing in this layer may expose a writable entity: no protocol controller
-     * binding exists yet, so a control request must not be able to find a
-     * target here. */
+    /*
+     * This test's premise changed with B7, and it is kept because the premise is
+     * what it checks: a device whose corpus entry names no writable recipe must
+     * expose no control, whatever controllers exist.
+     *
+     * It is driven here by a Wi-Fi observation with no recogniser and no database, so
+     * no recipe can be applied at all. The BLE capability question - whether a
+     * recognised BLE recipe becomes a control now that app_ctl_ble exists - is the
+     * subject of test_a_recognised_ble_recipe_is_controllable() below.
+     */
     app_scan_evidence_t ev;
     const uint8_t bssid[6] = {0x60, 0, 0, 0, 0, 1};
     bool truncated = false;
@@ -806,6 +865,42 @@ static void test_control_is_not_wired(void)
                   "turn_on is not supported by %s", e->entity_id);
         }
     }
+}
+
+/*
+ * Which backends the drivability switch admits, and which it still refuses.
+ *
+ * This is the single place the firmware decides whether a corpus recipe for a given
+ * protocol may become a control, so it is worth pinning in both directions: a backend
+ * flipped too early offers an action that silently does nothing, and one left off
+ * after its controller landed leaves a working device uncontrollable.
+ */
+static void test_drivability_follows_the_controllers(void)
+{
+    /* Read-only paths need no controller. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_NONE), "NONE is drivable");
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_PASSIVE_VALUE), "PASSIVE_VALUE is drivable");
+
+    /* BLE GATT: the controller landed in B7, so a recipe for it may be driven. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_BLE_GATT),
+          "BLE_GATT is not drivable although app_ctl_ble exists");
+
+    /* ESPHome: the controller landed in B7 as well, with its own host group. */
+    CHECK(app_backend_is_drivable(DEVICE_DB_BACKEND_ESPHOME_API),
+          "ESPHOME_API is not drivable although app_ctl_esphome exists");
+
+    /* Zigbee and Matter have no controller yet, and saying otherwise would offer
+     * controls that cannot work. */
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_ATTRIBUTE),
+          "ZIGBEE_ATTRIBUTE is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_ZIGBEE_COMMAND),
+          "ZIGBEE_COMMAND is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_ATTRIBUTE),
+          "MATTER_ATTRIBUTE is drivable without a controller");
+    CHECK(!app_backend_is_drivable(DEVICE_DB_BACKEND_MATTER_COMMAND),
+          "MATTER_COMMAND is drivable without a controller");
+    /* A value the format does not define. */
+    CHECK(!app_backend_is_drivable(0x7Fu), "an unknown backend is drivable");
 }
 
 /* ---------------- partial coverage and multi-source freshness ---------------- */
@@ -1126,6 +1221,7 @@ int main(void)
     test_tx_power_entity_only_when_advertised();
     test_same_bytes_different_protocol_are_different_devices();
     test_ble_address_type_is_part_of_identity();
+    test_ble_device_id_is_display_order();
     test_repeat_materialize_does_not_grow();
     test_generation_sweeps_unseen_ephemeral();
     test_unrun_protocol_does_not_sweep_its_devices();
@@ -1141,6 +1237,7 @@ int main(void)
     test_entity_capacity_is_bounded();
     test_hostile_ssid_is_not_injected();
     test_control_is_not_wired();
+    test_drivability_follows_the_controllers();
 
     printf("app_device: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

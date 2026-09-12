@@ -12,6 +12,15 @@ idf_component_register(
         "app_db_import.c"
         "app_portal.c"
         "app_provision.c"
+        "app_control.c"
+        "app_ctl_ble.c"
+        "app_ctl_ble_gatt.c"
+        "app_ctl_esphome.c"
+        "app_ble_gatt.c"
+        "app_ble_addr.c"
+        "app_ble_gatt_native.c"
+        "app_http_portal.c"
+        "app_portal_native.c"
         "app_device.c"
         "app_wifi.c"
         "app_scan_native.c"
@@ -30,6 +39,7 @@ idf_component_register(
         esp_wifi
         esp_event
         esp_netif
+        esp_http_server
         nvs_flash
         lwip
         fatfs

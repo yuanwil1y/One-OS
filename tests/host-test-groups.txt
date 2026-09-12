@@ -16,6 +16,7 @@ kismet_l2 tests/host/run_kismet_l2_host_tests.sh
 nmap_l2 tests/host/run_nmap_l2_tests.sh
 wireshark_l2 tests/host/run_wireshark_l2_tests.sh
 app_diag_protocol tests/host/run_app_diag_protocol_tests.sh
+app_cli_session tests/host/run_app_cli_session_tests.sh
 app_ops tests/host/run_app_ops_tests.sh
 app_scan tests/host/run_app_scan_tests.sh
 app_device tests/host/run_app_device_tests.sh
@@ -23,5 +24,13 @@ app_device_db tests/host/run_app_device_db_tests.sh
 app_db_import tests/host/run_app_db_import_tests.sh
 app_portal tests/host/run_app_portal_tests.sh
 app_provision tests/host/run_app_provision_tests.sh
+app_control tests/host/run_app_control_tests.sh
+app_ctl_ble tests/host/run_app_ctl_ble_tests.sh
+app_ctl_ble_gatt tests/host/run_app_ctl_ble_gatt_tests.sh
+app_ctl_esphome tests/host/run_app_ctl_esphome_tests.sh
+app_ble_gatt tests/host/run_app_ble_gatt_tests.sh
+app_ble_addr tests/host/run_app_ble_addr_tests.sh
+app_ble_native tests/host/run_app_ble_native_tests.sh
+app_acceptance tests/host/run_app_acceptance_tests.sh
 device_db_python tests/host/run_device_db_python_tests.sh
 device_db_format tests/host/run_device_db_tests.sh
